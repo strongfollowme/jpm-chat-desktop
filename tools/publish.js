@@ -77,6 +77,15 @@ if (!msi) {
     process.exit(1);
 }
 
+// ロールバック無効化(DISABLEROLLBACK=1)を MSI に埋め込む。
+// 利用者ごとのインストールでは <ドライブ>:\Config.Msi に書けない環境があり、
+// 「Could not set file security ... Error: 5」がインストール/アンインストール時に出るため。
+// ハッシュ計算より前に行うこと（ファイルが変わる）。
+execSync(
+    `powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(__dirname, "msi-set-property.ps1")}" -MsiPath "${msi}" -Name DISABLEROLLBACK -Value 1`,
+    { stdio: "inherit" },
+);
+
 const data = fs.readFileSync(msi);
 const sha512 = crypto.createHash("sha512").update(data).digest("base64");
 const fileName = `JPMChat-${version}.msi`;
