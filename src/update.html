@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>JPMチャットの更新</title>
+<style>
+  /* ログイン画面と同じ基調: 白いカード + slate の主色。枠なしウィンドウなので余白がそのまま影になる */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: transparent; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    color: #0f172a;
+    padding: 14px;
+  }
+  .card {
+    width: 100%;
+    height: 100%;
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 40px rgba(15, 23, 42, 0.28), 0 0 0 1px rgba(15, 23, 42, 0.06);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-app-region: drag;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 22px 24px 0;
+  }
+  .badge {
+    width: 48px; height: 48px; flex-shrink: 0;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #0f172a, #5b21b6);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .badge img { width: 34px; height: 34px; }
+  .title { margin: 0; font-size: 16px; font-weight: 700; }
+  .sub { margin: 4px 0 0; font-size: 12px; color: #64748b; }
+  .body { padding: 18px 24px 0; flex: 1; font-size: 13px; line-height: 1.7; color: #334155; }
+  .ver { display: flex; gap: 10px; align-items: center; margin: 2px 0 8px; }
+  .chip { padding: 3px 10px; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: 12px; font-weight: 600; }
+  .chip.new { background: #eef2ff; color: #4338ca; }
+  .arrow { color: #94a3b8; }
+  .progress { display: none; margin-top: 10px; }
+  .bar { height: 8px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #6366f1, #a855f7); transition: width 0.25s; }
+  .pct { margin-top: 6px; font-size: 12px; color: #64748b; }
+  .foot {
+    display: flex; gap: 10px; justify-content: flex-end;
+    padding: 16px 24px 22px;
+    -webkit-app-region: no-drag;
+  }
+  button {
+    height: 38px; padding: 0 18px;
+    border: none; border-radius: 10px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .primary { background: #1e293b; color: #fff; }
+  .primary:hover { background: #334155; }
+  .primary:disabled { background: #94a3b8; cursor: default; }
+  .ghost { background: #f1f5f9; color: #475569; }
+  .ghost:hover { background: #e2e8f0; }
+  .error { display: none; margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: #fef2f2; color: #b91c1c; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <div class="badge"><img src="assets/icon.png" alt="" /></div>
+      <div>
+        <h1 class="title" id="title">新しいバージョンがあります</h1>
+        <p class="sub" id="sub">更新するとチャットが一度再起動します</p>
+      </div>
+    </div>
+    <div class="body">
+      <div class="ver">
+        <span class="chip" id="cur">現在 -</span>
+        <span class="arrow">→</span>
+        <span class="chip new" id="new">-</span>
+      </div>
+      <div id="desc">今すぐ更新するか、次回の起動時に改めて確認するかを選んでください。</div>
+      <div class="progress" id="progress">
+        <div class="bar"><i id="barFill"></i></div>
+        <div class="pct" id="pct">ダウンロード中… 0%</div>
+      </div>
+      <div class="error" id="error"></div>
+    </div>
+    <div class="foot" id="foot">
+      <button class="ghost" id="later">次回にする</button>
+      <button class="primary" id="update">今すぐ更新</button>
+    </div>
+  </div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  document.getElementById("cur").textContent = "現在 " + (q.get("current") || "-");
+  document.getElementById("new").textContent = "v" + (q.get("version") || "-");
+
+  const btnUpdate = document.getElementById("update");
+  const btnLater = document.getElementById("later");
+  const progress = document.getElementById("progress");
+
+  btnLater.addEventListener("click", () => window.jpmUpdate.choose("later"));
+  btnUpdate.addEventListener("click", () => {
+    btnUpdate.disabled = true;
+    btnUpdate.textContent = "ダウンロード中…";
+    btnLater.style.display = "none";
+    progress.style.display = "block";
+    document.getElementById("desc").textContent = "更新ファイルを取得しています。しばらくお待ちください。";
+    window.jpmUpdate.choose("update");
+  });
+
+  // 取得の進み具合
+  window.jpmUpdate.onProgress((pct) => {
+    document.getElementById("barFill").style.width = pct + "%";
+    document.getElementById("pct").textContent = "ダウンロード中… " + pct + "%";
+  });
+
+  // 取得完了 → 再起動の確認に切り替える
+  window.jpmUpdate.onDownloaded(() => {
+    document.getElementById("title").textContent = "更新の準備ができました";
+    document.getElementById("sub").textContent = "再起動して新しいバージョンを適用します";
+    document.getElementById("desc").textContent = "「後で」を選んでも、次にアプリを終了した時に自動で適用されます。";
+    progress.style.display = "none";
+    const foot = document.getElementById("foot");
+    foot.innerHTML = "";
+    const later = document.createElement("button"); later.className = "ghost"; later.textContent = "後で";
+    later.addEventListener("click", () => window.jpmUpdate.choose("install-later"));
+    const now = document.createElement("button"); now.className = "primary"; now.textContent = "今すぐ再起動";
+    now.addEventListener("click", () => { now.disabled = true; now.textContent = "再起動しています…"; window.jpmUpdate.choose("install-now"); });
+    foot.append(later, now);
+  });
+
+  window.jpmUpdate.onError((msg) => {
+    const e = document.getElementById("error");
+    e.textContent = msg; e.style.display = "block";
+    progress.style.display = "none";
+    btnUpdate.disabled = false; btnUpdate.textContent = "もう一度試す";
+    btnLater.style.display = "";
+    btnLater.textContent = "閉じる";
+  });
+</script>
+</body>
+</html>

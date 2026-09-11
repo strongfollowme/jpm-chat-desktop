@@ -1,0 +1,794 @@
+/*
+ * JPMチャット デスクトップ版 - メインプロセス
+ *
+ * 【このアプリの存在理由】
+ * ブラウザのタブを閉じるとチャットの同期が止まり、通知が届かなくなる。
+ * element-web は Web Push に対応していないため、通知を受け続けるには
+ * 「常駐して同期し続けるプロセス」が要る。それがこのアプリ。
+ *
+ * 【方針】
+ * 画面は本番の element-web(https://chat.airparking.in) をそのまま読み込む。
+ * 二次開発した機能(アルバム、累積既読など)は Web 版と完全に同一のものが動く。
+ * このアプリが足すのは「常駐・通知・起動導線」だけで、チャット機能には手を入れない。
+ */
+
+const { app, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, nativeImage, dialog, session } = require("electron");
+const path = require("path");
+
+const { CHAT_ORIGIN, PROTOCOL } = require("./config");
+const { loginWithJpmAccount, exchangeLaunchCode, USER_AGENT } = require("./jpm-auth");
+const { setupAutoUpdater, currentVersion } = require("./updater");
+const {
+    buildInjectScript,
+    CHECK_SESSION_SCRIPT,
+    READ_SESSION_SCRIPT,
+    CLEAR_SESSION_SCRIPT,
+    DIAGNOSE_NOTIFICATION_SCRIPT,
+    NOTIFICATION_TRACE_SCRIPT,
+    ENABLE_NOTIFICATIONS_SCRIPT,
+} = require("./session-inject");
+const { initLogger, log, getLogPath } = require("./logger");
+const { MatrixNotifier } = require("./notifier");
+
+/*
+ * 【最重要】バックグラウンドでも同期を止めないための設定。
+ *
+ * webPreferences.backgroundThrottling: false だけでは足りない。Chromium は
+ * 「見えていないウィンドウ」のレンダラプロセス自体を低優先度にしたり凍結したりするため、
+ * ウィンドウを閉じて(トレイに格納して)いる間はメッセージが届かず通知も出ない。
+ * 実測: 非表示中に送ったメッセージが 38 秒経っても一切届かなかった。
+ *
+ * このアプリは「閉じていても通知を受け取る」ことが存在理由なので、
+ * 下記3つをプロセス起動時に無効化する（app.whenReady より前に設定する必要がある）。
+ */
+app.commandLine.appendSwitch("disable-background-timer-throttling");
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+// Windows 固有: ウィンドウが他の窓に隠れている/画面外にあることを検出して
+// レンダラを停止させる機能。これを切らないと、上記スイッチだけでは凍結を防げない。
+// (この状態だと /sync の通信自体は完了するのにページ側で処理されず、通知が出ない)
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+
+/** Windows の通知に表示名を出すために必要（設定しないと electron.app.* と表示される）。 */
+// 【注意】この ID は package.json の build.appId と一致させること（スタートメニューの
+// ショートカットに同じ ID が書かれ、Windows はそれで通知の表示名とアイコンを引く）。
+// 一度 "Electron" として登録された ID は Windows 側に名前がキャッシュされて直らないため、
+// 過去の開発時の ID(vc.jpm.chat.desktop)から変更している。
+app.setAppUserModelId("vc.jpm.jpmchat");
+
+let mainWindow = null;
+/**
+ * チャット本体を表示するビュー。
+ *
+ * ウィンドウに直接読み込まず、タイトルバーの高さ分だけ下にずらした領域に置く。
+ * こうすると右上のウィンドウ操作ボタン(最小化/最大化/閉じる)が部屋ヘッダのボタンに
+ * 重ならない。element-web のスタイルには一切手を入れない（Web 版と同じ見た目を保つ）。
+ */
+let chatView = null;
+/** タイトルバーの高さ(px)。ウィンドウ操作ボタンのオーバーレイと揃える。 */
+const TITLE_BAR_HEIGHT = 32;
+let tray = null;
+/** メインプロセス側の通知エンジン（レンダラが凍結しても通知を出し続ける役）。 */
+let notifier = null;
+/** トレイ常駐のため、× では終了しない。本当に終了する時だけ true にする。 */
+let isQuitting = false;
+
+// 【重要】build/ は electron-builder の buildResources 扱いで app.asar に含まれない。
+// パッケージ後もアイコンを読めるよう src/assets に置く（トレイが既定の Electron アイコンになるのを防ぐ）。
+const ICON_PATH = path.join(__dirname, "assets", "icon.png");
+// トレイは 16px 表示。1024 から縮小すると潰れるので、小サイズ用に描いた画像を使う。
+const TRAY_ICON_PATH = path.join(__dirname, "assets", "tray.png");
+
+// ---------------------------------------------------------------------------
+// 単一インスタンス制御
+// ---------------------------------------------------------------------------
+// 常駐アプリなので二重起動させない。二重起動しようとした場合(またはブラウザから
+// jpmchat:// で呼ばれた場合)は既存ウィンドウを前面に出す。
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+    app.quit();
+} else {
+    app.on("second-instance", (_event, argv) => {
+        log(`[protocol] 2つ目のインスタンスから引数を受信: ${argv.map((a) => a.replace(/code=[^&\s"]*/, "code=***")).join(" | ")}`);
+        showMainWindow();
+        // ブラウザから jpmchat://open?code=... で起動された場合（既に常駐中のときはこちらに来る）
+        const url = argv.find((a) => a.startsWith(`${PROTOCOL}://`));
+        if (url) void handleProtocolUrl(url);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// ウィンドウ
+// ---------------------------------------------------------------------------
+/** チャット本体の WebContents（ページへの操作はすべてこれ経由）。 */
+function wc() {
+    return chatView.webContents;
+}
+
+function createWindow() {
+    mainWindow = new BrowserWindow({
+        width: 1280,
+        height: 860,
+        minWidth: 800,
+        minHeight: 600,
+        show: false,
+        icon: ICON_PATH,
+        title: "JPMチャット",
+        // タイトルバーは Windows の既定だと強調色(青)になるので、灰色のオーバーレイに置き換える。
+        // ボタン(最小化/最大化/閉じる)は残る。Windows 11 以降で有効。
+        titleBarStyle: "hidden",
+        titleBarOverlay: { color: "#e2e8f0", symbolColor: "#1e293b", height: TITLE_BAR_HEIGHT },
+        // 上部のタイトルバー領域はこの色で塗られる
+        backgroundColor: "#e2e8f0",
+    });
+
+    chatView = new WebContentsView({
+        webPreferences: {
+            preload: path.join(__dirname, "preload.js"),
+            backgroundThrottling: false,
+            contextIsolation: true,
+            nodeIntegration: false,
+            // レンダラで動くのは他社製の巨大な SPA なので、権限は最小にしておく
+            sandbox: false,
+            spellcheck: false,
+        },
+    });
+    chatView.setBackgroundColor("#ffffff");
+    mainWindow.contentView.addChildView(chatView);
+
+    // チャット領域はタイトルバーの下に敷く。ウィンドウの大きさが変わったら追従させる
+    const layoutChatView = () => {
+        const [w, h] = mainWindow.getContentSize();
+        chatView.setBounds({ x: 0, y: TITLE_BAR_HEIGHT, width: w, height: Math.max(0, h - TITLE_BAR_HEIGHT) });
+    };
+    layoutChatView();
+    mainWindow.on("resize", layoutChatView);
+    mainWindow.on("maximize", layoutChatView);
+    mainWindow.on("unmaximize", layoutChatView);
+
+    mainWindow.setMenuBarVisibility(false);
+
+    // 利用者が戻ってきたら点滅を止め、未読の仮カウントをリセットする
+    // （以降の正確な未読数はページのタイトルから反映される）
+    mainWindow.on("focus", () => {
+        mainWindow.flashFrame(false);
+        pendingNotifications = 0;
+    });
+
+    // × では終了せずトレイへ格納する（常駐して通知を受け続けるため）
+    mainWindow.on("close", (e) => {
+        if (!isQuitting) {
+            e.preventDefault();
+            hideToTray();
+        }
+    });
+
+    // 【注意】ready-to-show はウィンドウ自身の webContents の事象で、内容を chatView に
+    // 移した今は発火しない。chatView の最初の読み込み完了で表示する。
+    // 何かで読み込みが止まっても真っ暗のままにならないよう、時間切れでも表示する。
+    let shown = false;
+    const showOnce = () => {
+        if (shown || !mainWindow || mainWindow.isDestroyed()) return;
+        shown = true;
+        if (process.argv.includes("--hidden")) {
+            // 自動起動時: フォーカスを奪わず一瞬だけ出し、同期が始まってから格納する
+            mainWindow.showInactive();
+            setTimeout(() => hideToTray(), 20000);
+        } else {
+            mainWindow.show();
+        }
+    };
+    chatView.webContents.once("did-finish-load", showOnce);
+    setTimeout(showOnce, 4000);
+
+    // --- 遷移の制限（安全）: チャット以外のオリジンをアプリ内で開かない ---
+    wc().on("will-navigate", (event, url) => {
+        if (isAllowedUrl(url)) return;
+        event.preventDefault();
+        const internal = toInternalUrl(url);
+        if (internal) {
+            showMainWindow();
+            safeLoad(() => wc().loadURL(internal));
+            return;
+        }
+        shell.openExternal(url);
+    });
+    wc().setWindowOpenHandler(({ url }) => {
+        // 通知をクリックした時などに matrix.to のリンクが開かれる。これを外部ブラウザに出すと
+        // 「通知を押したのに知らないサイトが開く」状態になるので、アプリ内で該当の部屋へ移動する。
+        const internal = toInternalUrl(url);
+        if (internal) {
+            showMainWindow();
+            safeLoad(() => wc().loadURL(internal));
+            return { action: "deny" };
+        }
+        // それ以外の外部リンクは既定のブラウザで開く（アプリ内に別ウィンドウを作らない）
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            shell.openExternal(url);
+        }
+        return { action: "deny" };
+    });
+
+    // element-web が自前のログイン画面(Matrix のユーザー名/パスワード)へ遷移したら、
+    // JPM アカウントで入れる自前のログイン画面に差し替える。
+    //   ・Matrix 側のパスワードはシステムが自動生成した値で利用者は知らない
+    //   ・OIDC 経由(「JPM Systemで続行」)でも入れるが、画面を何枚も跨ぐ必要がある
+    // セッション失効で追い出された時もここを通るので、常に JPM アカウントで復帰できる。
+    wc().on("did-navigate-in-page", (_e, url) => guardLoginPage(url));
+    wc().on("did-navigate", (_e, url) => guardLoginPage(url));
+
+    // タイトルの未読件数をタスクバーに反映する。
+    // element-web はタイトルを "[3] JPMチャット" のように更新するので、それを拾う。
+    // element-web のタイトルは "JPMチャット [3] | 部屋名" のように未読数が途中に入るため、
+    // 先頭固定ではなく文字列中の [数字] を拾う。
+    wc().on("page-title-updated", (_e, title) => {
+        mainWindow.setTitle(title || "JPMチャット");
+        const m = title.match(/\[(\d+)\]/);
+        const count = m ? parseInt(m[1], 10) : 0;
+        updateBadge(count);
+        if (count > 0) {
+            log(`[未読] ${count} 件 (ウィンドウ:${isWindowHidden() ? "非表示" : "表示中"})`);
+        }
+    });
+
+    // ページ側に注入した通知トレースの出力を拾う（原因切り分け用）。
+    // Electron 44 で引数形式が変わったため、新旧どちらでも動くようにしておく。
+    wc().on("console-message", (eventOrLevel, _level, messageArg) => {
+        const message =
+            eventOrLevel && typeof eventOrLevel === "object" && typeof eventOrLevel.message === "string"
+                ? eventOrLevel.message
+                : messageArg;
+        if (typeof message === "string" && message.startsWith("[JPM-NOTIFY] ")) {
+            const state = isWindowHidden() ? "非表示" : "表示中";
+            log(`[通知] 発火 (ウィンドウ:${state}): ${message.slice("[JPM-NOTIFY] ".length)}`);
+        }
+    });
+
+    // チャット本体を読み込むたびにトレースを入れ直す（ページ遷移で消えるため）
+    wc().on("did-finish-load", async () => {
+        const url = wc().getURL();
+        if (!url.startsWith(CHAT_ORIGIN)) return;
+        // 画面が持っている Matrix セッションを通知エンジンへ渡す。
+        // ウィンドウが見えている今のうちに読んでおけば、以降は凍結されても通知を出せる。
+        try {
+            const cred = await wc().executeJavaScript(READ_SESSION_SCRIPT, true);
+            log(`[通知エンジン] セッション読み出し: token=${cred && cred.token ? "あり" : "なし"} userId=${cred ? cred.userId : "null"} engine=${notifier ? "あり" : "なし"}`);
+            if (cred && cred.token && notifier) notifier.start(cred.token, cred.userId);
+        } catch (e) {
+            log("[通知エンジン] セッションの読み出しに失敗:", e.message);
+        }
+        try {
+            await wc().executeJavaScript(NOTIFICATION_TRACE_SCRIPT, true);
+            // 未設定なら「デスクトップ通知」を有効にする（このアプリは通知のために常駐するため）。
+            // 利用者が明示的にオフにしている場合は上書きしない。
+            const enabled = await wc().executeJavaScript(ENABLE_NOTIFICATIONS_SCRIPT, true);
+            if (enabled) {
+                log("[通知設定] デスクトップ通知を既定で有効にしました（反映のため再読み込みします）");
+                // element-web は起動時に設定を読むため、書き換えたら読み込み直す
+                wc().reload();
+                return;
+            }
+            const diag = await wc().executeJavaScript(DIAGNOSE_NOTIFICATION_SCRIPT, true);
+            log(
+                `[通知診断] 権限=${diag.permission} / デスクトップ通知=${diag.notificationsEnabled} ` +
+                    `/ 本文表示=${diag.notificationBodyEnabled} / 音=${diag.audioNotificationsEnabled}`,
+            );
+        } catch (e) {
+            log("[通知診断] 取得失敗:", e.message);
+        }
+    });
+
+    return mainWindow;
+}
+
+/**
+ * loadURL のラッパー。
+ *
+ * element-web は読み込み直後に自分でハッシュルート(#/home 等)へ遷移するため、
+ * Electron の loadURL は ERR_ABORTED(-3) で reject することがある。
+ * これは失敗ではなく「ページ側が先に遷移した」だけなので握りつぶす。
+ * 握りつぶさないと後続の処理(セッション確認・注入)が丸ごと実行されなくなる。
+ */
+async function safeLoad(loader) {
+    try {
+        await loader();
+    } catch (e) {
+        const msg = String(e && e.message);
+        if (msg.includes("ERR_ABORTED")) return;
+        throw e;
+    }
+    // ページ側スクリプトが動き出すまで待つ（DOM 構築完了を待機）
+    if (wc().isLoading()) {
+        await new Promise((resolve) => wc().once("did-stop-loading", resolve));
+    }
+}
+
+/**
+ * チャットのオリジンか。
+ * URL でもオリジン文字列でも受け付ける（末尾スラッシュの有無に影響されないようにするため）。
+ */
+function isChatOrigin(urlOrOrigin) {
+    try {
+        return new URL(urlOrOrigin).origin === CHAT_ORIGIN;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * matrix.to のリンクをアプリ内の URL に変換する。変換できなければ null。
+ *
+ * 通知のクリックや本文中のリンクから https://matrix.to/#/!room:server/$event という形で
+ * 飛ばされることがある。これは Matrix 共通の「どのクライアントで開くか選ばせる」中継ページで、
+ * 社内利用では意味が無いうえ、外部ブラウザが開いてしまい混乱するため自前で解決する。
+ */
+function toInternalUrl(url) {
+    const m = /^https:\/\/matrix\.to\/#\/(.+)$/.exec(url);
+    if (!m) return null;
+    const target = decodeURIComponent(m[1]);
+    // 先頭記号で行き先が決まる: ! と # は部屋、@ は利用者
+    if (target.startsWith("@")) return `${CHAT_ORIGIN}/#/user/${target}`;
+    if (target.startsWith("!") || target.startsWith("#")) return `${CHAT_ORIGIN}/#/room/${target}`;
+    return null;
+}
+
+/** アプリ内で開いてよい URL か（チャット本体とローカルのログイン画面のみ）。 */
+function isAllowedUrl(url) {
+    if (url.startsWith("file://")) return true;
+    return isChatOrigin(url);
+}
+
+
+/**
+ * ウィンドウを「トレイに格納」する。
+ *
+ * 通知はメインプロセス側の通知エンジン(notifier.js)が出すため、
+ * ここでは素直に hide() してよい（レンダラが凍結しても通知は途切れない）。
+ */
+function hideToTray() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.hide();
+    log("[ウィンドウ] トレイへ格納");
+}
+
+/**
+ * 利用者がこのウィンドウを見ていないか（通知を出すかの判断に使う）。
+ * 非表示・最小化だけでなく「表示はされているがフォーカスが無い」も含める。
+ * 別のアプリで作業中に届いたメッセージも通知するため（LINE と同じ挙動）。
+ */
+function isWindowHidden() {
+    if (!mainWindow || mainWindow.isDestroyed()) return true;
+    return !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused();
+}
+
+/**
+ * jpmchat:// で渡された URL を処理する。
+ *   jpmchat://open              … ウィンドウを前面に出すだけ
+ *   jpmchat://open?code=XXXX    … ワンタイムコードを Matrix セッションに引き換えてログインする
+ * 既にログイン済みでもコードが付いていれば、そのアカウントで入り直す（Web 側の利用者に合わせる）。
+ */
+async function handleProtocolUrl(url) {
+    let code = null;
+    try {
+        code = new URL(url).searchParams.get("code");
+    } catch {
+        // 解析できない URL は無視
+    }
+    log(`[protocol] 受信: code=${code ? "あり" : "なし"}`);
+    showMainWindow();
+    if (!code) return;
+    try {
+        const session = await exchangeLaunchCode(code);
+        await applySessionAndOpenChat(session);
+        log("[protocol] ワンタイムコードでログインしました");
+    } catch (e) {
+        log("[protocol] コードの引き換えに失敗:", e.message);
+        // 失敗しても既存セッションがあればそのまま使える。無ければログイン画面が出る
+        dialog.showMessageBox(mainWindow, {
+            type: "warning",
+            message: "Web からの自動ログインに失敗しました",
+            detail: `${e.message}\n\nJPM アカウントでログインし直してください。`,
+            buttons: ["OK"],
+        });
+    }
+}
+
+function showMainWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+}
+
+/** 直前の未読件数（増えた時だけタスクバーを点滅させるため）。 */
+let lastUnreadCount = 0;
+
+/** 利用者が見ていない間に届いた通知の数（フォーカスが戻ったらリセット）。 */
+let pendingNotifications = 0;
+
+/**
+ * 新着を利用者に気付かせる（LINE と同じ見え方）。
+ *   ・タスクバーのボタンを点滅させる（Windows の FlashWindow）
+ *   ・トレイに格納中なら、最小化状態でタスクバーへ戻してから点滅させる
+ *     （タスクバーに無いと点滅する場所が無いため。フォーカスは奪わない）
+ *   ・アイコンに未読バッジを重ねる
+ */
+function attractAttention() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    pendingNotifications++;
+    if (!mainWindow.isVisible()) {
+        // 【順序が重要】showInactive() の後に minimize() する。逆だと showInactive が
+        // 最小化を解除してウィンドウが画面に出てきてしまう（利用者が閉じたのに勝手に開く）。
+        mainWindow.setSkipTaskbar(false);
+        mainWindow.showInactive();
+        mainWindow.minimize();
+    }
+    mainWindow.flashFrame(true);
+    updateBadge(pendingNotifications);
+}
+
+/**
+ * 未読件数をタスクバー・トレイに反映する。
+ *
+ * LINE と同じ見え方にするため、次の3つを行う:
+ *   1. タスクバーアイコンに赤いバッジ（件数）を重ねる
+ *   2. 未読が増えた瞬間にタスクバーを点滅させる（Windows 標準の注意喚起）
+ *   3. トレイアイコンも未読ありの絵に差し替える
+ */
+function updateBadge(count) {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    if (process.platform === "win32") {
+        if (count > 0) {
+            const label = count > 99 ? "99+" : String(count);
+            mainWindow.setOverlayIcon(createBadgeIcon(label), `未読 ${label} 件`);
+        } else {
+            mainWindow.setOverlayIcon(null, "");
+        }
+    } else {
+        app.setBadgeCount(count);
+    }
+
+    // 未読が増えた時だけ点滅させる（同じ件数のまま再描画された時は鳴らさない）
+    if (count > lastUnreadCount && !mainWindow.isFocused()) {
+        mainWindow.flashFrame(true);
+    } else if (count === 0) {
+        mainWindow.flashFrame(false);
+    }
+    lastUnreadCount = count;
+
+    updateTrayIcon(count);
+}
+
+/** トレイアイコンを未読状態に合わせて差し替える。 */
+function updateTrayIcon(count) {
+    if (!tray) return;
+    tray.setToolTip(count > 0 ? `JPMチャット（未読 ${count} 件）` : "JPMチャット");
+    const base = nativeImage.createFromPath(TRAY_ICON_PATH);
+    if (base.isEmpty()) return;
+    tray.setImage(base.resize({ width: 16, height: 16 }));
+}
+
+/** 未読バッジ画像をその場で描く（外部画像を持たずに済ませる）。 */
+function createBadgeIcon(label) {
+    const size = 32;
+    const fontSize = label.length >= 3 ? 13 : 18;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
+        <circle cx="16" cy="16" r="15" fill="#d32f2f"/>
+        <text x="16" y="16" font-family="Segoe UI, sans-serif" font-size="${fontSize}"
+              font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="central">${label}</text>
+    </svg>`;
+    return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+}
+
+// ---------------------------------------------------------------------------
+// トレイ
+// ---------------------------------------------------------------------------
+function createTray() {
+    const icon = nativeImage.createFromPath(TRAY_ICON_PATH);
+    tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
+    tray.setToolTip(`JPMチャット ${currentVersion()}`);
+    tray.setContextMenu(
+        Menu.buildFromTemplate([
+            { label: `JPMチャットを開く（v${currentVersion()}）`, click: showMainWindow },
+            { type: "separator" },
+            {
+                label: "Windows起動時に自動で開始する",
+                type: "checkbox",
+                checked: app.getLoginItemSettings().openAtLogin,
+                click: (item) => {
+                    // 常駐しないと通知が来ないので、自動起動を既定の使い方にしたい
+                    app.setLoginItemSettings({ openAtLogin: item.checked, args: ["--hidden"] });
+                },
+            },
+            {
+                label: "ログアウト",
+                click: async () => {
+                    const { response } = await dialog.showMessageBox(mainWindow, {
+                        type: "question",
+                        buttons: ["ログアウト", "キャンセル"],
+                        defaultId: 1,
+                        cancelId: 1,
+                        message: "ログアウトしますか？",
+                        detail: "次回起動時に再度 JPM アカウントでのログインが必要になります。",
+                    });
+                    if (response === 0) await logout();
+                },
+            },
+            {
+                // 「通知が来ない」等の調査用。利用者にこのファイルを送ってもらう
+                label: "ログを開く",
+                click: () => {
+                    const p = getLogPath();
+                    if (p) shell.showItemInFolder(p);
+                },
+            },
+            { type: "separator" },
+            {
+                label: "終了",
+                click: () => {
+                    isQuitting = true;
+                    app.quit();
+                },
+            },
+        ]),
+    );
+    tray.on("double-click", showMainWindow);
+}
+
+// ---------------------------------------------------------------------------
+// 画面遷移（ログイン画面 ⇔ チャット本体）
+// ---------------------------------------------------------------------------
+
+/** ローカルのログイン画面を表示する。 */
+async function showLoginPage() {
+    await safeLoad(() => wc().loadFile(path.join(__dirname, "login.html")));
+}
+
+/** 差し替え処理の再入防止（loadFile 自体が did-navigate を発火させるため）。 */
+let redirectingToLogin = false;
+
+/**
+ * element-web のログイン/ウェルカム画面に着いたら、自前のログイン画面へ差し替える。
+ * @param {string} url 遷移先 URL
+ */
+async function guardLoginPage(url) {
+    if (redirectingToLogin) return;
+    if (!url.startsWith(CHAT_ORIGIN)) return;
+
+    const hash = url.split("#")[1] || "";
+    if (!(hash.startsWith("/login") || hash.startsWith("/welcome") || hash.startsWith("/forgot_password"))) {
+        return;
+    }
+    redirectingToLogin = true;
+    try {
+        log("[ログイン] element-web のログイン画面を検出したため JPM ログイン画面へ差し替えます");
+        await showLoginPage();
+    } finally {
+        redirectingToLogin = false;
+    }
+}
+
+/**
+ * チャット本体を開く。セッションが無ければログイン画面へ回す。
+ * @param {boolean} allowLoginFallback セッション未確立時にログイン画面を出すか
+ */
+async function openChat(allowLoginFallback = true) {
+    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
+    const hasSession = await wc().executeJavaScript(CHECK_SESSION_SCRIPT, true);
+    log(`[起動] 既存セッション: ${hasSession ? "あり" : "なし"}`);
+    if (!hasSession && allowLoginFallback) {
+        await showLoginPage();
+    }
+}
+
+/**
+ * ログイン成功後: チャットのオリジンでセッションを注入してから本体を開く。
+ * トークンを URL に載せないため、オリジン上でスクリプトを実行する方式にしている。
+ */
+async function applySessionAndOpenChat(session) {
+    // 注入スクリプトを走らせるためにチャットのオリジンを一度読み込む
+    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
+    await wc().executeJavaScript(buildInjectScript(session), true);
+    log("[ログイン] Matrix セッションを注入しました");
+    if (notifier) notifier.start(session.accessToken, session.userId);
+    // 注入した認証情報で element-web を初期化し直す
+    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/#/home"));
+}
+
+async function logout() {
+    try {
+        if (new URL(wc().getURL()).origin === CHAT_ORIGIN) {
+            await wc().executeJavaScript(CLEAR_SESSION_SCRIPT, true);
+        }
+    } catch {
+        // URL が file:// 等でも問題ない。続けてログイン画面へ移る
+    }
+    if (notifier) notifier.stop();
+    updateBadge(0);
+    await showLoginPage();
+    showMainWindow();
+}
+
+// ---------------------------------------------------------------------------
+// IPC（ログイン画面 → メインプロセス）
+// ---------------------------------------------------------------------------
+// 通知が発火したことの記録（preload から送られる。原因切り分け用）
+ipcMain.on("jpm:notification-fired", (_event, title) => {
+    const state = mainWindow && isWindowHidden() ? "非表示" : "表示中";
+    log(`[通知] 発火 (ウィンドウ:${state}): ${title}`);
+});
+
+ipcMain.handle("jpm:login", async (_event, { username, password }) => {
+    if (!username || !password) {
+        return { ok: false, message: "ユーザー名とパスワードを入力してください" };
+    }
+    try {
+        const session = await loginWithJpmAccount(username, password);
+        await applySessionAndOpenChat(session);
+        return { ok: true };
+    } catch (e) {
+        // サーバーからの日本語メッセージ（ロック残り回数など）をそのまま返す
+        return { ok: false, message: e.message || "ログインに失敗しました" };
+    }
+});
+
+// ---------------------------------------------------------------------------
+// 起動
+// ---------------------------------------------------------------------------
+/**
+ * 権限要求の扱い。
+ *
+ * チャットの機能を Web 版と同一にするため、element-web が使う権限は許可する
+ * （通知が拒否されると本アプリの存在意義が無くなる。通話・画面共有も Web 版で使える）。
+ * 一方で位置情報など、チャットに不要なものは既定で拒否する。
+ */
+function configurePermissions() {
+    const ALLOWED = new Set([
+        "notifications",
+        "media", // マイク・カメラ（通話）
+        "display-capture", // 画面共有
+        "clipboard-read",
+        "clipboard-sanitized-write",
+        "fullscreen",
+        "background-sync",
+    ]);
+
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+        // チャット本体からの要求だけを対象にする
+        callback(isChatOrigin(webContents.getURL()) && ALLOWED.has(permission));
+    });
+
+    // 同期的に問い合わせられる経路（Notification.permission の参照など）も同じ基準で答える。
+    // 【注意】requestingOrigin は "https://chat.airparking.in/" のように末尾スラッシュ付きで
+    // 渡ってくることがあるため、文字列の完全一致で比べてはいけない（比較に失敗すると
+    // 通知権限が denied になり、通知が一切出なくなる）。
+    session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+        return isChatOrigin(requestingOrigin) && ALLOWED.has(permission);
+    });
+}
+
+/**
+ * Matrix の同期通信を監視する。
+ *
+ * 「通知が来ない」時に、同期そのものが止まっているのか、同期はできているが
+ * 通知が出ていないのかを切り分けるための計測。1分に1回だけ要約を出す。
+ */
+function watchSyncRequests() {
+    let ok = 0;
+    let ng = 0;
+    let seen = 0;
+    let lastReport = Date.now();
+
+    // URL パターンは広めに取り、コールバック側で /sync を選別する
+    // （細かいパターンだと一致せず、計測そのものが空振りする）
+    const filter = { urls: [`${CHAT_ORIGIN}/*`] };
+
+    session.defaultSession.webRequest.onCompleted(filter, (details) => {
+        if (!details.url.includes("/sync")) return;
+        if (details.statusCode >= 200 && details.statusCode < 300) ok++;
+        else {
+            ng++;
+            log(`[同期] 応答 ${details.statusCode}`);
+        }
+        // 最初の数回は毎回出す（起動直後に同期できているかを確認するため）
+        if (++seen <= 5) {
+            log(`[同期] ${seen}回目 status=${details.statusCode} (ウィンドウ:${isWindowHidden() ? "非表示" : "表示中"})`);
+        }
+        const now = Date.now();
+        if (now - lastReport >= 60000) {
+            log(`[同期] 直近1分: 成功${ok}件 / 失敗${ng}件 (ウィンドウ:${isWindowHidden() ? "非表示" : "表示中"})`);
+            ok = 0;
+            ng = 0;
+            lastReport = now;
+        }
+    });
+
+    session.defaultSession.webRequest.onErrorOccurred(filter, (details) => {
+        if (!details.url.includes("/sync")) return;
+        if (String(details.error).includes("ABORTED")) return; // タイムアウト打ち切りは正常
+        log(`[同期] エラー: ${details.error}`);
+    });
+}
+
+app.whenReady().then(async () => {
+    initLogger();
+    watchSyncRequests();
+
+    notifier = new MatrixNotifier({
+        iconPath: ICON_PATH,
+        isWindowHidden: () => isWindowHidden(),
+        onNotified: () => attractAttention(),
+        onOpenRoom: (roomId) => {
+            // 通知をクリックしたらウィンドウを出して該当の部屋を開く
+            showMainWindow();
+            safeLoad(() => wc().loadURL(`${CHAT_ORIGIN}/#/room/${roomId}`));
+        },
+    });
+    configurePermissions();
+    const _fs = require("fs");
+    log(`[起動] アイコン=${_fs.existsSync(ICON_PATH)} トレイ画像=${_fs.existsSync(TRAY_ICON_PATH)}`);
+
+    // ブラウザの「アプリ」アイコンから起動できるようにプロトコルを登録する
+    if (process.defaultApp) {
+        // 開発時(electron . 実行)はインタプリタとスクリプトパスを渡す必要がある
+        if (process.argv.length >= 2) {
+            app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+        }
+    } else {
+        app.setAsDefaultProtocolClient(PROTOCOL);
+    }
+
+    createWindow();
+    createTray();
+
+    // チャット側から見える UA を、反クローラフィルタが許可する形に揃える
+    wc().setUserAgent(USER_AGENT);
+
+    // 自動起動時(--hidden)はトレイだけで待機する。
+    //
+    // 【重要】いきなり hide してはいけない。一度も表示していないウィンドウは
+    // Chromium が描画パイプラインを起動せず、element-web の同期が始まらないため、
+    // メッセージも通知も一切届かなくなる（実測で確認済み）。
+    // フォーカスを奪わない showInactive() で一瞬だけ出し、同期が始まってから隠す。
+    // --hidden の扱いは createWindow 内の showOnce に集約した
+
+    await openChat();
+
+    // exe が起動していない状態でブラウザから jpmchat:// を踏むと、URL は起動引数で渡ってくる
+    const launchUrl = process.argv.find((a) => a.startsWith(`${PROTOCOL}://`));
+    if (launchUrl) void handleProtocolUrl(launchUrl);
+
+    // ページ側のセッションを定期的に読み直し、通知エンジンが止まっていれば新しいトークンで再開する
+    // （同じ端末IDで別の場所からログインし直すと旧トークンが失効して通知エンジンだけ止まるため）
+    setInterval(async () => {
+        try {
+            if (!notifier || !wc() || wc().isDestroyed()) return;
+            if (!wc().getURL().startsWith(CHAT_ORIGIN)) return;
+            const cred = await wc().executeJavaScript(READ_SESSION_SCRIPT, true);
+            if (cred && cred.token) notifier.start(cred.token, cred.userId);
+        } catch {
+            // ページが読み込み中などで取れない時は次回に回す
+        }
+    }, 60 * 1000);
+
+    // 自動更新: 起動直後に確認し、その後は定期的に確認する
+    setupAutoUpdater({
+        getWindow: () => mainWindow,
+        log,
+        // 更新適用のための終了。× の「トレイへ格納」を無効にしてから終了する
+        quitForUpdate: () => {
+            isQuitting = true;
+            app.quit();
+        },
+    });
+});
+
+// 常駐アプリなので、全ウィンドウが閉じてもプロセスは終了させない
+app.on("window-all-closed", (e) => {
+    e.preventDefault();
+});
+
+app.on("before-quit", () => {
+    isQuitting = true;
+});

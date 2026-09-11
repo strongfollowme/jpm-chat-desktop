@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>JPMチャット ログイン</title>
+<style>
+  /* 主アプリ(jpm-web-react)のログイン画面と同じ見た目:
+     同じ背景画像 + 半透明白のガラス風カード + 左右上角の青いドット網点 + JPM ロゴ */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 16px;
+    background: #0f172a url("assets/login-bg.png") center / cover no-repeat;
+    font-family: "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    color: #0f172a;
+    /* タイトルバーを消しているので、余白部分でウィンドウを掴めるようにする */
+    -webkit-app-region: drag;
+  }
+  .card {
+    position: relative;
+    width: 100%;
+    max-width: 384px;
+    overflow: hidden;
+    padding: 32px 28px;
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
+    -webkit-app-region: no-drag;
+  }
+  /* 左右上角のドット網点（中心へ向かってフェード） */
+  .dots {
+    pointer-events: none;
+    position: absolute;
+    top: 0;
+    background-image: radial-gradient(circle, rgba(37, 99, 235, 0.6) 1.3px, transparent 1.7px);
+    background-size: 9px 9px;
+  }
+  .dots.left {
+    left: 0; width: 256px; height: 176px;
+    -webkit-mask-image: radial-gradient(130% 130% at 0% 0%, #000 0%, transparent 62%);
+    mask-image: radial-gradient(130% 130% at 0% 0%, #000 0%, transparent 62%);
+  }
+  .dots.right {
+    right: 0; width: 288px; height: 208px;
+    -webkit-mask-image: radial-gradient(130% 130% at 100% 0%, #000 0%, transparent 60%);
+    mask-image: radial-gradient(130% 130% at 100% 0%, #000 0%, transparent 60%);
+  }
+  .head { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 28px; }
+  .head img { height: 56px; width: auto; margin-bottom: 12px; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.08)); }
+  .title { margin: 0; font-size: 24px; font-weight: 700; color: #1e3a8a; }
+  .subtitle { margin: 6px 0 0; font-size: 14px; color: #64748b; }
+  .field { position: relative; margin-bottom: 16px; }
+  label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; color: #334155; }
+  input {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    color: #1e293b;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input::placeholder { color: #94a3b8; }
+  input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }
+  button {
+    width: 100%;
+    margin-top: 6px;
+    padding: 11px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #ffffff;
+    background: #1e293b;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: #334155; }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  .error {
+    display: none;
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #b91c1c;
+    background: #fef2f2;
+    border-radius: 8px;
+  }
+  .note { position: relative; margin: 20px 0 0; font-size: 11px; line-height: 1.6; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+  <form class="card" id="form">
+    <div class="dots left"></div>
+    <div class="dots right"></div>
+
+    <div class="head">
+      <img src="assets/jpm-logo.png" alt="JPM" />
+      <h1 class="title">JPMチャット</h1>
+      <p class="subtitle">JPM システムのアカウントでログイン</p>
+    </div>
+
+    <div class="error" id="error"></div>
+
+    <div class="field">
+      <label for="username">ユーザー名</label>
+      <input id="username" type="text" autocomplete="username" placeholder="ユーザー名を入力" autofocus />
+    </div>
+    <div class="field">
+      <label for="password">パスワード</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="パスワードを入力" />
+    </div>
+
+    <button type="submit" id="submit">ログイン</button>
+
+    <p class="note">ウィンドウを閉じてもトレイに常駐し、<br />メッセージの通知を受け取り続けます。</p>
+  </form>
+
+<script>
+  const form = document.getElementById("form");
+  const errorBox = document.getElementById("error");
+  const submitBtn = document.getElementById("submit");
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = "block";
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorBox.style.display = "none";
+    submitBtn.disabled = true;
+    submitBtn.textContent = "ログイン中...";
+
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value;
+
+    try {
+      // 認証はメインプロセスで行う（レンダラに通信処理とトークンを持たせない）
+      const result = await window.jpmDesktop.login(username, password);
+      if (!result.ok) {
+        showError(result.message || "ログインに失敗しました");
+      }
+      // 成功時はメインプロセスがチャット画面へ遷移させるので、ここでは何もしない
+    } catch (err) {
+      showError("予期しないエラーが発生しました: " + err.message);
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "ログイン";
+    }
+  });
+</script>
+</body>
+</html>

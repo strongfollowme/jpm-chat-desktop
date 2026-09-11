@@ -1,0 +1,58 @@
+{
+  "name": "jpm-chat-desktop",
+  "productName": "JPMチャット",
+  "version": "0.1.0",
+  "jpmVersion": "0.1.0.17",
+  "private": true,
+  "description": "JPMチャットのデスクトップ版。ウィンドウを閉じてもトレイに常駐し、通知を受け取り続ける。",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win msi --x64",
+    "release": "node tools/publish.js"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "vc.jpm.jpmchat",
+    "productName": "JPMチャット",
+    "buildVersion": "0.1.0.17",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*"
+    ],
+    "publish": {
+      "provider": "generic",
+      "url": "http://192.168.26.26:8099/jpm-chat/"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "msi",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "msi": {
+      "oneClick": false,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "JPMチャット",
+      "additionalLightArgs": [
+        "-cultures:ja-jp",
+        "-dWixUIBannerBmp=../../build/msi-banner.bmp",
+        "-dWixUIDialogBmp=../../build/msi-dialog.bmp"
+      ]
+    }
+  }
+}
