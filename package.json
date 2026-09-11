@@ -2,7 +2,7 @@
   "name": "jpm-chat-desktop",
   "productName": "JPMチャット",
   "version": "0.1.0",
-  "jpmVersion": "0.1.0.26",
+  "jpmVersion": "0.1.0.27",
   "private": true,
   "description": "JPMチャットのデスクトップ版。ウィンドウを閉じてもトレイに常駐し、通知を受け取り続ける。",
   "main": "src/main.js",
@@ -18,7 +18,7 @@
   "build": {
     "appId": "vc.jpm.jpmchat",
     "productName": "JPMチャット",
-    "buildVersion": "0.1.0.26",
+    "buildVersion": "0.1.0.27",
     "directories": {
       "output": "release",
       "buildResources": "build"

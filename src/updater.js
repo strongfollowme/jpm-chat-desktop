@@ -18,7 +18,7 @@
  * 発行手順は tools/publish.js を参照。
  */
 
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -275,18 +275,50 @@ function setupAutoUpdater({ getWindow, log, quitForUpdate }) {
         }
     }
 
-    async function check() {
-        if (busy) return;
+    /**
+     * 更新を確認する。
+     * @param {boolean} manual 利用者がトレイの「更新を確認」から呼んだ時 true。
+     *   自動確認は静かに（最新なら何も出さない、届かなくてもログだけ）。手動は結果を必ずダイアログで返し、
+     *   「後で」にしていた版ももう一度案内する。
+     */
+    async function check(manual = false) {
+        if (busy) {
+            if (manual) await showInfo("更新を取得中です", "ダウンロードが終わるまでお待ちください。");
+            return;
+        }
         try {
             const info = await fetchLatest();
-            if (compareVersion(info.version, currentVersion()) <= 0) return;
-            if (postponedVersion === info.version) return;
+            if (compareVersion(info.version, currentVersion()) <= 0) {
+                if (manual) await showInfo("最新版です", `現在の版: ${currentVersion()}
+配信中の版: ${info.version}`);
+                return;
+            }
+            if (!manual && postponedVersion === info.version) return;
+            if (manual) postponedVersion = null;
             log(`[更新] 新しい版があります: ${info.version} (現在 ${currentVersion()})`);
             await offerUpdate(info);
         } catch (e) {
-            // 配信サーバーに届かない（社外・26 停止中）のは日常的にあり得るので、ログだけにする
+            // 配信サーバーに届かない（社外・26 停止中）のは日常的にあり得るので、自動確認はログだけにする
             log("[更新] 確認できませんでした:", e && e.message);
+            if (manual) await showInfo("更新を確認できませんでした", `配信サーバーに接続できません。
+${(e && e.message) || e}`);
         }
+    }
+
+    async function showInfo(message, detail) {
+        const win = getWindow();
+        const opts = { type: "info", buttons: ["OK"], title: "JPMチャット", message, detail };
+        await (win && !win.isDestroyed() ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+    }
+
+    // ウィンドウを開いた時にも確認する（30 分に 1 回まで）。発売直後でも 4 時間待たずに気付けるように
+    const SHOW_CHECK_MIN_INTERVAL_MS = 30 * 60 * 1000;
+    let lastShowCheck = 0;
+    function checkOnShow() {
+        const now = Date.now();
+        if (now - lastShowCheck < SHOW_CHECK_MIN_INTERVAL_MS) return;
+        lastShowCheck = now;
+        void check(false);
     }
 
     // 「後で」を選んだ取得済み MSI は終了時に適用する（利用者が自分で終了した時は起動し直さない）
@@ -298,8 +330,10 @@ function setupAutoUpdater({ getWindow, log, quitForUpdate }) {
         runInstaller(msi, false);
     });
 
-    setTimeout(check, FIRST_CHECK_DELAY_MS);
-    setInterval(check, CHECK_INTERVAL_MS);
+    setTimeout(() => check(false), FIRST_CHECK_DELAY_MS);
+    setInterval(() => check(false), CHECK_INTERVAL_MS);
+
+    return { checkManually: () => check(true), checkOnShow };
 }
 
 module.exports = { setupAutoUpdater, currentVersion };

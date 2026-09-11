@@ -408,7 +408,12 @@ function showMainWindow() {
     if (mainWindow.isMinimized()) mainWindow.restore();
     if (!mainWindow.isVisible()) mainWindow.show();
     mainWindow.focus();
+    // 開いたついでに更新を確認する（30 分に 1 回まで）
+    if (updater) updater.checkOnShow();
 }
+
+/** 自動更新の操作口（setupAutoUpdater の戻り値）。トレイの「更新を確認」と窓を開いた時の確認に使う */
+let updater = null;
 
 /** 直前の未読件数（増えた時だけタスクバーを点滅させるため）。 */
 let lastUnreadCount = 0;
@@ -537,6 +542,12 @@ function createTray() {
     tray.setContextMenu(
         Menu.buildFromTemplate([
             { label: `JPMチャットを開く（v${currentVersion()}）`, click: showMainWindow },
+            {
+                label: `更新を確認（現在 v${currentVersion()}）`,
+                click: () => {
+                    if (updater) void updater.checkManually();
+                },
+            },
             { type: "separator" },
             {
                 label: "Windows起動時に自動で開始する",
@@ -972,7 +983,7 @@ app.whenReady().then(async () => {
     }, 60 * 1000);
 
     // 自動更新: 起動直後に確認し、その後は定期的に確認する
-    setupAutoUpdater({
+    updater = setupAutoUpdater({
         getWindow: () => mainWindow,
         log,
         // 更新適用のための終了。× の「トレイへ格納」を無効にしてから終了する
