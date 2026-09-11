@@ -15,9 +15,16 @@ const { JPM_API_BASE } = require("./config");
  * 反クローラフィルタ(AntiCrawlerFilter)対策の User-Agent。
  * 先頭が Mozilla でないと 403 で弾かれる。末尾の識別子はサーバー側ログでの追跡用。
  */
+// Chrome の版は Electron が内蔵する Chromium の実版を名乗る。固定の古い版(120)にしていたら、
+// element-web の対応ブラウザ判定(直近 2 版の Chrome)に落ちて「このブラウザをサポートしていません」が
+// 出続けた（閉じても再表示）。JPMChatDesktop/<版> は反クローラ判定と調査用の目印。
+const CHROME_VERSION = (process.versions && process.versions.chrome) || "120.0.0.0";
+const APP_VERSION = (() => {
+    try { return require("../package.json").jpmVersion || "0.1.0"; } catch (_) { return "0.1.0"; }
+})();
 const USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-    "Chrome/120.0.0.0 Safari/537.36 JPMChatDesktop/0.1.0";
+    `Chrome/${CHROME_VERSION} Safari/537.36 JPMChatDesktop/${APP_VERSION}`;
 
 /** 応答が JSON でない(nginx のエラーページ等)場合も落ちないように読む。 */
 async function readJson(resp) {

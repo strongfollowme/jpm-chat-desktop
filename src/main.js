@@ -248,6 +248,9 @@ function createWindow() {
     wc().on("did-finish-load", async () => {
         const url = wc().getURL();
         if (!url.startsWith(CHAT_ORIGIN)) return;
+        // ログイン直後のセッション注入中は何もしない。注入のための一時読み込みに反応して
+        // 通知設定の書き換え→reload を走らせると、注入と再読み込みが同時に進んで画面が固まった（実測）
+        if (sessionInjecting) return;
         // 画面が持っている Matrix セッションを通知エンジンへ渡す。
         // ウィンドウが見えている今のうちに読んでおけば、以降は凍結されても通知を出せる。
         try {
@@ -583,13 +586,15 @@ async function showLoginPage() {
 
 /** 差し替え処理の再入防止（loadFile 自体が did-navigate を発火させるため）。 */
 let redirectingToLogin = false;
+/** ログイン成功後のセッション注入中か。注入のための一時読み込みに他の処理が反応しないようにする。 */
+let sessionInjecting = false;
 
 /**
  * element-web のログイン/ウェルカム画面に着いたら、自前のログイン画面へ差し替える。
  * @param {string} url 遷移先 URL
  */
 async function guardLoginPage(url) {
-    if (redirectingToLogin) return;
+    if (redirectingToLogin || sessionInjecting) return;
     if (!url.startsWith(CHAT_ORIGIN)) return;
 
     const hash = url.split("#")[1] || "";
@@ -623,10 +628,16 @@ async function openChat(allowLoginFallback = true) {
  * トークンを URL に載せないため、オリジン上でスクリプトを実行する方式にしている。
  */
 async function applySessionAndOpenChat(session) {
-    // 注入スクリプトを走らせるためにチャットのオリジンを一度読み込む
-    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
-    await wc().executeJavaScript(buildInjectScript(session), true);
-    log("[ログイン] Matrix セッションを注入しました");
+    sessionInjecting = true;
+    try {
+        // 注入スクリプトを走らせるためにチャットのオリジンを一度読み込む
+        // （この読み込みに did-finish-load / did-navigate の処理が反応しないよう sessionInjecting で抑止する）
+        await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
+        await wc().executeJavaScript(buildInjectScript(session), true);
+        log("[ログイン] Matrix セッションを注入しました");
+    } finally {
+        sessionInjecting = false;
+    }
     if (notifier) notifier.start(session.accessToken, session.userId);
     // 注入した認証情報で element-web を初期化し直す
     await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/#/home"));
