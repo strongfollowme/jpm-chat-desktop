@@ -702,9 +702,11 @@ async function applySessionAndOpenChat(session) {
         // localStorage だけ消して IndexedDB を残すと、新しいセッションと古いストアが食い違って
         // element-web の起動が固まった（ログアウト→再ログインのたびに再現）
         await clearChatStorage();
-        // 注入スクリプトを走らせるためにチャットのオリジンを一度読み込む
-        // （この読み込みに did-finish-load / did-navigate の処理が反応しないよう sessionInjecting で抑止する）
-        await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
+        // 注入スクリプトを走らせるために、チャットと同じオリジンの「素のページ」(/config.json: JSON が文字で表示されるだけで JS 無し。/version は octet-stream で下載扱いになる)を読む。
+        // "/" を読むと、直前が "/#/login" 等の時にハッシュ違いの同一文書扱いになって element が動いたまま
+        // localStorage を書き換えることになり、真っ白な画面になった（実測）。/config.json → /#/home は本当の遷移になる。
+        // （同じサイト内なのでレンダラプロセスは変わらない＝入力が効かなくなる問題は起きない）
+        await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/config.json?_=" + Date.now()));
         await wc().executeJavaScript(buildInjectScript(session), true);
         // 「デスクトップ通知」もここで有効にしておく（起動後に書き換えて reload しなくて済む）
         await wc().executeJavaScript(ENABLE_NOTIFICATIONS_SCRIPT, true);
@@ -856,7 +858,8 @@ async function logout() {
     // 未ログイン状態にしておく（file:// 等へ飛ばすとプロセスが入れ替わり入力が効かなくなる）
     await showLoginPage();
     await clearChatStorage();
-    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
+    // element を動かしたままにせず、同じオリジンの素のページへ退避させておく（次のログインで本当の遷移になる）
+    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/config.json?_=" + Date.now()));
     showMainWindow();
 }
 
