@@ -65,6 +65,19 @@ let mainWindow = null;
  * 重ならない。element-web のスタイルには一切手を入れない（Web 版と同じ見た目を保つ）。
  */
 let chatView = null;
+/**
+ * ログイン画面専用の WebContentsView（チャット本体の上に重ねる）。
+ *
+ * 【なぜ別ビューか】チャット本体のビューを file://(login.html) → https://(チャット) と跨って
+ * 遷移させると、Chromium がレンダラプロセスを入れ替えた後も古い方の入力用ウィンドウ
+ * (Chrome_RenderWidgetHostHWND)が残ってマウス操作を全部吸い取り、画面は描けているのに
+ * 一切クリックできない状態になった（実測。ビューの付け直し・サイズ揺らし・hide/show でも直らない）。
+ * ログイン画面を別ビューにすれば、チャット本体は常に同じサイト内でしか遷移せずプロセスも変わらない。
+ */
+let loginView = null;
+let loginShown = false;
+/** ビューの位置合わせ（createWindow で設定。ログイン画面を出す時にも呼ぶ） */
+let layoutViews = () => {};
 /** タイトルバーの高さ(px)。ウィンドウ操作ボタンのオーバーレイと揃える。 */
 const TITLE_BAR_HEIGHT = 32;
 let tray = null;
@@ -142,15 +155,29 @@ function createWindow() {
     chatView.setBackgroundColor("#ffffff");
     mainWindow.contentView.addChildView(chatView);
 
-    // チャット領域はタイトルバーの下に敷く。ウィンドウの大きさが変わったら追従させる
-    const layoutChatView = () => {
+    // ログイン画面用のビュー（必要な時だけ子ビューに加えて手前に出す）
+    loginView = new WebContentsView({
+        webPreferences: {
+            preload: path.join(__dirname, "preload.js"),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: false,
+            spellcheck: false,
+        },
+    });
+    loginView.setBackgroundColor("#ffffff");
+
+    // チャット領域（とログイン画面）はタイトルバーの下に敷く。ウィンドウの大きさが変わったら追従させる
+    layoutViews = () => {
         const [w, h] = mainWindow.getContentSize();
-        chatView.setBounds({ x: 0, y: TITLE_BAR_HEIGHT, width: w, height: Math.max(0, h - TITLE_BAR_HEIGHT) });
+        const bounds = { x: 0, y: TITLE_BAR_HEIGHT, width: w, height: Math.max(0, h - TITLE_BAR_HEIGHT) };
+        chatView.setBounds(bounds);
+        if (loginView) loginView.setBounds(bounds);
     };
-    layoutChatView();
-    mainWindow.on("resize", layoutChatView);
-    mainWindow.on("maximize", layoutChatView);
-    mainWindow.on("unmaximize", layoutChatView);
+    layoutViews();
+    mainWindow.on("resize", layoutViews);
+    mainWindow.on("maximize", layoutViews);
+    mainWindow.on("unmaximize", layoutViews);
 
     mainWindow.setMenuBarVisibility(false);
 
@@ -599,7 +626,30 @@ function createTray() {
 
 /** ローカルのログイン画面を表示する。 */
 async function showLoginPage() {
-    await safeLoad(() => wc().loadFile(path.join(__dirname, "login.html")));
+    if (!loginView || !mainWindow || mainWindow.isDestroyed()) return;
+    if (loginShown) return;
+    loginShown = true;
+    // 毎回読み直す（前回の入力を残さない。file:// 同士なのでプロセスは変わらない）
+    try {
+        await loginView.webContents.loadFile(path.join(__dirname, "login.html"));
+    } catch (e) {
+        log(`[ログイン] ログイン画面の読み込みに失敗: ${e.message}`);
+    }
+    if (!mainWindow.contentView.children.includes(loginView)) mainWindow.contentView.addChildView(loginView);
+    layoutViews();
+    loginView.setVisible(true);
+    loginView.webContents.focus();
+}
+
+/** ログイン画面を下げる（チャット本体が見える） */
+function hideLoginPage() {
+    if (!loginView || !loginShown) return;
+    loginShown = false;
+    loginView.setVisible(false);
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.contentView.children.includes(loginView)) {
+        mainWindow.contentView.removeChildView(loginView);
+    }
+    wc().focus();
 }
 
 /** 差し替え処理の再入防止（loadFile 自体が did-navigate を発火させるため）。 */
@@ -663,8 +713,9 @@ async function applySessionAndOpenChat(session) {
         sessionInjecting = false;
     }
     if (notifier) notifier.start(session.accessToken, session.userId);
-    // 注入した認証情報で element-web を初期化し直す
+    // 注入した認証情報で element-web を初期化し直す（同じサイト内の遷移なのでプロセスは変わらない）
     await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/#/home"));
+    hideLoginPage();
 }
 
 /**
@@ -801,9 +852,11 @@ async function logout() {
     }
     if (notifier) notifier.stop();
     updateBadge(0);
-    // 先にログイン画面へ移ってから消す（チャットのページが開いたまま IndexedDB を消すと固まることがある）
+    // 先にログイン画面を手前に出してから消す。チャット本体は同じサイト内で読み直して
+    // 未ログイン状態にしておく（file:// 等へ飛ばすとプロセスが入れ替わり入力が効かなくなる）
     await showLoginPage();
     await clearChatStorage();
+    await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
     showMainWindow();
 }
 
@@ -946,7 +999,14 @@ app.whenReady().then(async () => {
     // 開発・検証用: 外部スクリプトに画面操作を任せる（ログアウト→再ログインの自動テスト等。本番では未設定）
     if (process.env.JPM_CHAT_DEBUG_SCRIPT) {
         try {
-            require(process.env.JPM_CHAT_DEBUG_SCRIPT)({ app, getWebContents: () => wc(), log, CHAT_ORIGIN, logout });
+            require(process.env.JPM_CHAT_DEBUG_SCRIPT)({
+                app,
+                getWebContents: () => wc(),
+                getLoginWebContents: () => (loginShown && loginView ? loginView.webContents : null),
+                log,
+                CHAT_ORIGIN,
+                logout,
+            });
         } catch (e) {
             log(`[debug] スクリプトの読み込みに失敗: ${e.message}`);
         }
