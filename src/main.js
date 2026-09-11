@@ -84,6 +84,10 @@ const TRAY_ICON_PATH = path.join(__dirname, "assets", "tray.png");
 // ---------------------------------------------------------------------------
 // 常駐アプリなので二重起動させない。二重起動しようとした場合(またはブラウザから
 // jpmchat:// で呼ばれた場合)は既存ウィンドウを前面に出す。
+// 開発・検証用: 本番の exe と同じ PC で同時に動かす時は保存先を分ける（単一インスタンスのロックは保存先ごと）
+if (process.env.JPM_CHAT_USER_DATA) {
+    app.setPath("userData", process.env.JPM_CHAT_USER_DATA);
+}
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
     // quit() は非同期で、その後の whenReady 等が走ってしまう（起動ログやショートカット作成が
@@ -268,10 +272,11 @@ function createWindow() {
             // 利用者が明示的にオフにしている場合は上書きしない。
             const enabled = await wc().executeJavaScript(ENABLE_NOTIFICATIONS_SCRIPT, true);
             if (enabled) {
-                log("[通知設定] デスクトップ通知を既定で有効にしました（反映のため再読み込みします）");
-                // element-web は起動時に設定を読むため、書き換えたら読み込み直す
-                wc().reload();
-                return;
+                // 【重要】ここで reload してはいけない。element-web が初期化中(IndexedDB/暗号ストアの作成)に
+                // 再読み込みすると次の読み込みが固まった（ログアウト→再ログインのたびに再現）。
+                // 通常はログイン時にセッションと一緒に書き込むので、ここに来るのは古いセッションだけ。
+                // 次回起動から反映されればよい（通知そのものはメインプロセスの通知エンジンが出す）
+                log("[通知設定] デスクトップ通知を既定で有効にしました（次回の読み込みから反映）");
             }
             const diag = await wc().executeJavaScript(DIAGNOSE_NOTIFICATION_SCRIPT, true);
             log(
@@ -632,10 +637,16 @@ async function openChat(allowLoginFallback = true) {
 async function applySessionAndOpenChat(session) {
     sessionInjecting = true;
     try {
+        // 前のセッションの保存データ(IndexedDB の同期/暗号ストア等)を先に消す。
+        // localStorage だけ消して IndexedDB を残すと、新しいセッションと古いストアが食い違って
+        // element-web の起動が固まった（ログアウト→再ログインのたびに再現）
+        await clearChatStorage();
         // 注入スクリプトを走らせるためにチャットのオリジンを一度読み込む
         // （この読み込みに did-finish-load / did-navigate の処理が反応しないよう sessionInjecting で抑止する）
         await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/"));
         await wc().executeJavaScript(buildInjectScript(session), true);
+        // 「デスクトップ通知」もここで有効にしておく（起動後に書き換えて reload しなくて済む）
+        await wc().executeJavaScript(ENABLE_NOTIFICATIONS_SCRIPT, true);
         log("[ログイン] Matrix セッションを注入しました");
     } finally {
         sessionInjecting = false;
@@ -643,6 +654,130 @@ async function applySessionAndOpenChat(session) {
     if (notifier) notifier.start(session.accessToken, session.userId);
     // 注入した認証情報で element-web を初期化し直す
     await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/#/home"));
+}
+
+/**
+ * チャットのオリジンに溜まった保存データ(localStorage / IndexedDB / Cache / ServiceWorker)を消す。
+ * ログアウト時と、別のセッションを注入する直前に使う。
+ * element-web 自身のログアウトはこれらを消すが、こちらのログアウトは localStorage しか消しておらず、
+ * 残った IndexedDB(同期/暗号ストア)が次のセッションと食い違って画面が固まっていた。
+ */
+async function clearChatStorage() {
+    try {
+        await session.defaultSession.clearStorageData({
+            origin: CHAT_ORIGIN,
+            storages: ["localstorage", "indexdb", "cachestorage", "serviceworkers", "websql"],
+        });
+        log("[セッション] チャットの保存データを消去しました");
+    } catch (e) {
+        log(`[セッション] 保存データの消去に失敗: ${e.message}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// チャット画面(element-web)の更新検知
+// ---------------------------------------------------------------------------
+/**
+ * サーバー側の element-web が入れ替わったら知らせる。
+ * exe は画面を読み込んだまま常駐するので、サーバーを更新しても自動では新しくならない
+ * （利用者が「更新したのに変わらない」となった）。/version(no-cache) を定期的に見て、
+ * 変わっていたら HTTP キャッシュを消して読み込み直す。窓が隠れている時は黙って、見えている時は聞いてから。
+ */
+let loadedChatVersion = null;
+let chatVersionAskedFor = null;
+
+async function fetchChatVersion() {
+    const resp = await fetch(`${CHAT_ORIGIN}/version?t=${Date.now()}`, {
+        headers: { "User-Agent": USER_AGENT, "Cache-Control": "no-cache" },
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return (await resp.text()).trim();
+}
+
+async function reloadChatForNewVersion(version) {
+    try {
+        await session.defaultSession.clearCache();
+    } catch (e) {
+        log(`[画面更新] キャッシュの消去に失敗: ${e.message}`);
+    }
+    loadedChatVersion = version;
+    chatVersionAskedFor = null;
+    log(`[画面更新] キャッシュを消して読み込み直します (${version})`);
+    wc().reload();
+}
+
+function startChatVersionWatcher() {
+    const INTERVAL_MS = 5 * 60 * 1000;
+    const check = async () => {
+        try {
+            const v = await fetchChatVersion();
+            if (!loadedChatVersion) {
+                loadedChatVersion = v;
+                return;
+            }
+            if (v === loadedChatVersion) return;
+            // ログイン画面等を出している時は、次にチャットを読む時に自然と新しくなる
+            if (!wc().getURL().startsWith(CHAT_ORIGIN)) {
+                loadedChatVersion = v;
+                return;
+            }
+            log(`[画面更新] チャット画面の新しい版を検出: ${loadedChatVersion} → ${v}`);
+            if (isWindowHidden()) {
+                await reloadChatForNewVersion(v);
+                return;
+            }
+            if (chatVersionAskedFor === v) return; // 「後で」と言われた版は、窓が隠れた時に黙って読み直す
+            chatVersionAskedFor = v;
+            const { response } = await dialog.showMessageBox(mainWindow, {
+                type: "info",
+                buttons: ["今すぐ再読み込み", "後で"],
+                defaultId: 0,
+                cancelId: 1,
+                title: "JPMチャット",
+                message: "チャット画面が更新されました",
+                detail: "新しい画面に切り替えるために読み込み直します。入力途中の文章は下書きとして残ります。",
+            });
+            if (response === 0) await reloadChatForNewVersion(v);
+        } catch (e) {
+            log(`[画面更新] 版の確認に失敗: ${e.message}`);
+        }
+    };
+    setTimeout(check, 30 * 1000);
+    setInterval(check, INTERVAL_MS);
+}
+
+/**
+ * exe の版が変わった最初の起動で HTTP キャッシュを消す。
+ * 更新後に古い画像(ロゴ等)が残って見えるのを防ぐ。
+ */
+async function clearCacheIfAppUpdated() {
+    const fs = require("fs");
+    const marker = path.join(app.getPath("userData"), "last-app-version.txt");
+    const current = (() => {
+        try {
+            return require("../package.json").jpmVersion || app.getVersion();
+        } catch (_) {
+            return app.getVersion();
+        }
+    })();
+    let last = null;
+    try {
+        last = fs.readFileSync(marker, "utf8").trim();
+    } catch (_) {
+        // 初回
+    }
+    if (last === current) return;
+    try {
+        await session.defaultSession.clearCache();
+        log(`[起動] 版が変わったため HTTP キャッシュを消去しました (${last || "初回"} → ${current})`);
+    } catch (e) {
+        log(`[起動] キャッシュの消去に失敗: ${e.message}`);
+    }
+    try {
+        fs.writeFileSync(marker, current, "utf8");
+    } catch (_) {
+        // 書けなくても次回また消すだけ
+    }
 }
 
 async function logout() {
@@ -655,7 +790,9 @@ async function logout() {
     }
     if (notifier) notifier.stop();
     updateBadge(0);
+    // 先にログイン画面へ移ってから消す（チャットのページが開いたまま IndexedDB を消すと固まることがある）
     await showLoginPage();
+    await clearChatStorage();
     showMainWindow();
 }
 
@@ -690,7 +827,7 @@ ipcMain.handle("jpm:login", async (_event, { username, password }) => {
  *
  * チャットの機能を Web 版と同一にするため、element-web が使う権限は許可する
  * （通知が拒否されると本アプリの存在意義が無くなる。通話・画面共有も Web 版で使える）。
- * 一方で位置情報など、チャットに不要なものは既定で拒否する。
+ * それ以外（センサー・MIDI 等）のチャットに不要なものは既定で拒否する。
  */
 function configurePermissions() {
     const ALLOWED = new Set([
@@ -701,6 +838,7 @@ function configurePermissions() {
         "clipboard-sanitized-write",
         "fullscreen",
         "background-sync",
+        "geolocation", // 位置情報の共有（現場から送る用途がある。Web 版と同じく利用者が操作した時だけ要求される）
     ]);
 
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
@@ -775,6 +913,7 @@ app.whenReady().then(async () => {
         },
     });
     configurePermissions();
+    await clearCacheIfAppUpdated();
     const _fs = require("fs");
     log(`[起動] アイコン=${_fs.existsSync(ICON_PATH)} トレイ画像=${_fs.existsSync(TRAY_ICON_PATH)}`);
 
@@ -791,6 +930,16 @@ app.whenReady().then(async () => {
     createWindow();
     createTray();
     ensureDesktopShortcut();
+    startChatVersionWatcher();
+
+    // 開発・検証用: 外部スクリプトに画面操作を任せる（ログアウト→再ログインの自動テスト等。本番では未設定）
+    if (process.env.JPM_CHAT_DEBUG_SCRIPT) {
+        try {
+            require(process.env.JPM_CHAT_DEBUG_SCRIPT)({ app, getWebContents: () => wc(), log, CHAT_ORIGIN, logout });
+        } catch (e) {
+            log(`[debug] スクリプトの読み込みに失敗: ${e.message}`);
+        }
+    }
 
     // チャット側から見える UA を、反クローラフィルタが許可する形に揃える
     wc().setUserAgent(USER_AGENT);
