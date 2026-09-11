@@ -17,6 +17,7 @@ const COMPONENT_GUID = "7A2C9E6B-5D41-4F8B-9C3E-2B6F1D0A8E57";
 exports.default = async function (projectFile) {
     const pkg = require("../package.json");
     const exe = `${pkg.build.productName}.exe`;
+    const lnk = `${pkg.build.productName}.lnk`;
     const protocol = require("../src/config").PROTOCOL;
 
     const fragment = [
@@ -32,22 +33,51 @@ exports.default = async function (projectFile) {
         `            <RegistryValue Type="string" Value="&quot;[APPLICATIONFOLDER]${exe}&quot; &quot;%1&quot;"/>`,
         `          </RegistryKey>`,
         `        </RegistryKey>`,
+        // インストール先を覚えておき、次回（手動での上書き/更新）も同じ場所に入れる
+        `        <RegistryKey Root="HKCU" Key="Software\\JPM\\JPMChat" ForceDeleteOnUninstall="yes">`,
+        `          <RegistryValue Type="string" Name="InstallDir" Value="[APPLICATIONFOLDER]"/>`,
+        `        </RegistryKey>`,
         `      </Component>`,
         `    </ComponentGroup>`,
     ].join("\n");
 
     let xml = fs.readFileSync(projectFile, "utf8");
 
-    // 「インストール範囲(自分のみ / 全ユーザー)」の選択画面を飛ばす。
-    // 本製品は利用者ごとのインストール固定(perMachine=false)なので選ばせる意味が無く、
-    // しかも ja-jp の標準文言がこの画面で重なって崩れて見える。Welcome → 確認 → 実行 にする。
-    const scopeNext = 'Event="NewDialog" Value="InstallScopeDlg" Order="2">NOT Installed</Publish>';
-    const scopeBack = '<Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="InstallScopeDlg" Order="2">NOT Installed</Publish>';
-    if (!xml.includes(scopeNext) || !xml.includes(scopeBack)) {
-        throw new Error("msi-project.js: InstallScopeDlg の遷移が見つかりません（electron-builder の雛形が変わった？）");
-    }
-    xml = xml.replace(scopeNext, 'Event="NewDialog" Value="VerifyReadyDlg" Order="2">NOT Installed</Publish>');
-    xml = xml.replace(scopeBack, '<Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">NOT Installed</Publish>');
+    // 「インストール範囲(自分のみ / 全ユーザー)」の選択画面を飛ばし、代わりにインストール先の選択画面を出す。
+    // 本製品は利用者ごとのインストール固定(perMachine=false)なので範囲を選ばせる意味が無く、
+    // しかも ja-jp の標準文言がこの画面で重なって崩れて見える。Welcome → インストール先 → 確認 → 実行 にする。
+    const replaceOnce = (from, to) => {
+        if (!xml.includes(from)) throw new Error(`msi-project.js: 雛形に見つかりません（electron-builder の雛形が変わった？）: ${from}`);
+        xml = xml.replace(from, to);
+    };
+    replaceOnce('<Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallScopeDlg" Order="2">NOT Installed</Publish>',
+                '<Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2">NOT Installed</Publish>');
+    replaceOnce('<Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="InstallScopeDlg" Order="2">1</Publish>',
+                '<Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">1</Publish>');
+    // 「確認 → 戻る → インストール先」は WixUI_InstallDir が既に持っているので、雛形が足した範囲画面行きを消すだけ
+    replaceOnce('<Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="InstallScopeDlg" Order="2">NOT Installed</Publish>', '');
+
+    // デスクトップのショートカットは MSI に持たせない（package.json の createDesktopShortcut=false）。
+    // 【理由】MSI が .lnk を作成/削除すると Windows Installer は既存の .lnk を <そのドライブ>:\Config.Msi へ
+    // 改名して回滚用に退避する。デスクトップが D: 等のデータドライブにある PC では利用者に Modify 権限しか無く
+    // （権限の変更＝WRITE_DAC が無い）、退避ファイルの権限変更に失敗して「Error 1926」が卸载のたびに出た（実測）。
+    // DISABLEROLLBACK でも止まらない。作成はアプリ起動時(src/main.js ensureDesktopShortcut)、
+    // 削除はここで普通の del を実行する（普通の削除は退避しない）。
+    replaceOnce('<Directory Id="ProgramMenuFolder"/>',
+                '<Directory Id="DesktopFolder" Name="Desktop"/>\n      <Directory Id="ProgramMenuFolder"/>');
+    replaceOnce('    <Directory Id="TARGETDIR" Name="SourceDir">', [
+        `    <!-- 前回のインストール先を復元する（手動での上書き・更新でも同じ場所に入れる） -->`,
+        `    <Property Id="APPLICATIONFOLDER">`,
+        `      <RegistrySearch Id="JpmChatInstallDirSearch" Root="HKCU" Key="Software\\JPM\\JPMChat" Name="InstallDir" Type="raw"/>`,
+        `    </Property>`,
+        `    <!-- 卸载時にデスクトップのショートカットを普通の削除で消す（回滚退避を発生させない） -->`,
+        `    <CustomAction Id="JpmChatRemoveDesktopLnk" Directory="DesktopFolder" ExeCommand="cmd.exe /c del /q /f &quot;[DesktopFolder]${lnk}&quot;" Execute="deferred" Impersonate="yes" Return="ignore"/>`,
+        `    <InstallExecuteSequence>`,
+        `      <Custom Action="JpmChatRemoveDesktopLnk" After="InstallInitialize">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>`,
+        `    </InstallExecuteSequence>`,
+        ``,
+        `    <Directory Id="TARGETDIR" Name="SourceDir">`,
+    ].join("\n"));
 
     const marker = "    </ComponentGroup>";
     const idx = xml.lastIndexOf(marker);
@@ -56,5 +86,7 @@ exports.default = async function (projectFile) {
     }
     xml = xml.slice(0, idx) + fragment + xml.slice(idx + marker.length);
     fs.writeFileSync(projectFile, xml, "utf8");
-    console.log(`  • msi-project.js: ${protocol}:// のレジストリ登録を MSI に追加（アンインストールで削除）、範囲選択画面を省略`);
+    // 生成物の確認用に控えを残す（release/ は git 管理外）
+    try { fs.writeFileSync(require("path").join(__dirname, "..", "release", "last-project.wxs"), xml, "utf8"); } catch (_) { /* 無くても困らない */ }
+    console.log(`  • msi-project.js: ${protocol}:// のレジストリ登録を MSI に追加（アンインストールで削除）、範囲選択→インストール先選択、デスクトップ .lnk は del で削除`);
 };

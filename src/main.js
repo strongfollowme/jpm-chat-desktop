@@ -484,6 +484,42 @@ function createBadgeIcon(label) {
 // ---------------------------------------------------------------------------
 // トレイ
 // ---------------------------------------------------------------------------
+/**
+ * デスクトップのショートカットは MSI ではなくアプリ自身が作る。
+ *
+ * 【理由】MSI にショートカットを持たせると、作成/削除のたびに Windows Installer が既存の .lnk を
+ * <そのドライブ>:\Config.Msi へ改名して回滚用に退避する。デスクトップが D: 等のデータドライブにある PC では
+ * 利用者に Modify 権限しか無く（権限の変更＝WRITE_DAC が無い）、退避ファイルの権限変更に失敗して
+ * 「Error 1926」が卸载のたびに出た（実測）。DISABLEROLLBACK でも止まらない。
+ * 卸载時は MSI のカスタムアクションが普通の del で消す（build/msi-project.js）。
+ * 利用者が自分で消したショートカットは、同じ版の間は作り直さない。
+ */
+function ensureDesktopShortcut() {
+    if (!app.isPackaged || process.platform !== "win32") return;
+    const fs = require("fs");
+    try {
+        const lnk = path.join(app.getPath("desktop"), `${app.name}.lnk`);
+        const marker = path.join(app.getPath("userData"), "desktop-shortcut.json");
+        const version = require("../package.json").jpmVersion || app.getVersion();
+        if (fs.existsSync(lnk)) return;
+        let made = null;
+        try { made = JSON.parse(fs.readFileSync(marker, "utf8")).version; } catch (_) { /* 未作成 */ }
+        if (made === version) return;
+        const ok = shell.writeShortcutLink(lnk, "create", {
+            target: process.execPath,
+            cwd: path.dirname(process.execPath),
+            icon: process.execPath,
+            iconIndex: 0,
+            appUserModelId: "vc.jpm.jpmchat",
+            description: app.name,
+        });
+        fs.writeFileSync(marker, JSON.stringify({ version, created: new Date().toISOString() }), "utf8");
+        log(`[起動] デスクトップショートカット作成 ${ok ? "成功" : "失敗"}: ${lnk}`);
+    } catch (e) {
+        log(`[起動] デスクトップショートカット作成に失敗: ${e.message}`);
+    }
+}
+
 function createTray() {
     const icon = nativeImage.createFromPath(TRAY_ICON_PATH);
     tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }));
@@ -741,6 +777,7 @@ app.whenReady().then(async () => {
 
     createWindow();
     createTray();
+    ensureDesktopShortcut();
 
     // チャット側から見える UA を、反クローラフィルタが許可する形に揃える
     wc().setUserAgent(USER_AGENT);

@@ -165,11 +165,14 @@ function setupAutoUpdater({ getWindow, log, quitForUpdate }) {
         const ps1 = path.join(dir, "apply-update.ps1");
         const logFile = path.join(dir, "update.log");
         const q = (v) => `'${String(v).replace(/'/g, "''")}'`;
+        // 利用者がインストール先を変えていても同じ場所へ上書きする（既定のままなら既定の場所）。
+        // 末尾の \ は付けない（msiexec の引数で \" と解釈されて壊れる）
+        const installDirArg = `APPLICATIONFOLDER="${path.dirname(exe).replace(/[\\/]+$/, "")}"`;
         const lines = [
             `$log = ${q(logFile)}`,
             `Add-Content -Path $log -Value ("[{0}] apply start: {1}" -f (Get-Date -Format s), ${q(msiPath)})`,
             `Start-Sleep -Seconds 3`,
-            `$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', ${q(msiPath)}, '/passive', '/norestart') -Wait -PassThru`,
+            `$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', ${q(msiPath)}, '/passive', '/norestart', ${q(installDirArg)}) -Wait -PassThru`,
             `Add-Content -Path $log -Value ("[{0}] msiexec exit={1}" -f (Get-Date -Format s), $p.ExitCode)`,
         ];
         if (relaunch) {
