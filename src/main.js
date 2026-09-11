@@ -86,7 +86,9 @@ const TRAY_ICON_PATH = path.join(__dirname, "assets", "tray.png");
 // jpmchat:// で呼ばれた場合)は既存ウィンドウを前面に出す。
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
-    app.quit();
+    // quit() は非同期で、その後の whenReady 等が走ってしまう（起動ログやショートカット作成が
+    // 二重に出た実測あり）。ここで即座に終了する
+    app.exit(0);
 } else {
     app.on("second-instance", (_event, argv) => {
         log(`[protocol] 2つ目のインスタンスから引数を受信: ${argv.map((a) => a.replace(/code=[^&\s"]*/, "code=***")).join(" | ")}`);

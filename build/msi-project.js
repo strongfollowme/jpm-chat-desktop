@@ -20,6 +20,20 @@ exports.default = async function (projectFile) {
     const lnk = `${pkg.build.productName}.lnk`;
     const protocol = require("../src/config").PROTOCOL;
 
+    // MSI が入れるファイルの一覧（release/win-unpacked の直下）。卸载/更新時に MSI が消す前に
+    // 普通の del で消しておくための正確な名前のリスト。ワイルドカードは使わない
+    // （利用者がインストール先に D:\ 直下などを選んでいても、他のファイルを巻き込まないため）。
+    const unpackedDir = require("path").join(__dirname, "..", "release", "win-unpacked");
+    const entries = fs.readdirSync(unpackedDir, { withFileTypes: true });
+    const wipeFiles = entries.filter((e) => e.isFile()).map((e) => e.name);
+    const wipeDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    if (!wipeFiles.includes(exe) || wipeDirs.length === 0) {
+        throw new Error(`msi-project.js: ${unpackedDir} の内容が想定と違います（${exe} が無い、またはサブフォルダ無し）`);
+    }
+    const xmlQ = (v) => `&quot;${v}&quot;`;
+    const wipeFileList = wipeFiles.map(xmlQ).join(" ");
+    const wipeDirList = wipeDirs.map(xmlQ).join(" ");
+
     const fragment = [
         `      <Component Id="JpmChatProtocolReg" Guid="{${COMPONENT_GUID}}" Directory="APPLICATIONFOLDER">`,
         `        <RegistryKey Root="HKCU" Key="Software\\Classes\\${protocol}" ForceDeleteOnUninstall="yes">`,
@@ -70,9 +84,22 @@ exports.default = async function (projectFile) {
         `    <Property Id="APPLICATIONFOLDER">`,
         `      <RegistrySearch Id="JpmChatInstallDirSearch" Root="HKCU" Key="Software\\JPM\\JPMChat" Name="InstallDir" Type="raw"/>`,
         `    </Property>`,
+        `    <!-- 起動中のアプリを先に終了させる。動かしたまま上書き/削除すると、古いプロセスが消えたファイルを抱えて`,
+        `         残り続け、新しい exe を起動しても単一インスタンスの転送先が古い方になって固まる（実測） -->`,
+        `    <CustomAction Id="JpmChatCloseApp" Directory="TARGETDIR" ExeCommand="cmd.exe /c taskkill /IM &quot;${exe}&quot; /F /T" Execute="immediate" Return="ignore"/>`,
+        `    <!-- 卸载・更新で MSI がファイルを消す前に、普通の del で消しておく。`,
+        `         Windows Installer は消すファイルを <ドライブ>:\\Config.Msi へ改名して回滚退避するが、D: 等のデータ`,
+        `         ドライブでは利用者に権限変更(WRITE_DAC)が無く Error 1926 になる。先に消しておけば MSI は`,
+        `         「ファイル無し」として通過し退避しない。更新時は新しい MSI 側がこれを行うので、古い版の卸载も通る。`,
+        `         名前は MSI が入れたものだけ（ワイルドカード無し）。resources\\app.asar が無ければ何もしない -->`,
+        `    <Property Id="JPMCHAT_WIPE_FILES" Value="${wipeFileList}"/>`,
+        `    <Property Id="JPMCHAT_WIPE_DIRS" Value="${wipeDirList}"/>`,
+        `    <CustomAction Id="JpmChatWipeFiles" Directory="APPLICATIONFOLDER" ExeCommand="cmd.exe /c if exist &quot;resources\\app.asar&quot; (del /q /f [JPMCHAT_WIPE_FILES] &amp; rmdir /s /q [JPMCHAT_WIPE_DIRS])" Execute="immediate" Return="ignore"/>`,
         `    <!-- 卸载時にデスクトップのショートカットを普通の削除で消す（回滚退避を発生させない） -->`,
         `    <CustomAction Id="JpmChatRemoveDesktopLnk" Directory="DesktopFolder" ExeCommand="cmd.exe /c del /q /f &quot;[DesktopFolder]${lnk}&quot;" Execute="deferred" Impersonate="yes" Return="ignore"/>`,
         `    <InstallExecuteSequence>`,
+        `      <Custom Action="JpmChatCloseApp" Before="InstallValidate">1</Custom>`,
+        `      <Custom Action="JpmChatWipeFiles" Before="RemoveExistingProducts">REMOVE~="ALL" OR WIX_UPGRADE_DETECTED</Custom>`,
         `      <Custom Action="JpmChatRemoveDesktopLnk" After="InstallInitialize">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>`,
         `    </InstallExecuteSequence>`,
         ``,
