@@ -1,0 +1,390 @@
+/* JPMチャット セットアップ — すりガラス風の一枚画面 */
+:root {
+  --ink: #0f172a;
+  --muted: #64748b;
+  --line: rgba(15, 23, 42, 0.08);
+  --accent: #6d28d9;
+  --accent-2: #db2777;
+  --glass: rgba(255, 255, 255, 0.86);
+  --radius: 22px;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* 窓は透明。カードの周りに影のための余白(24px)を body だけに取る（html にも付けると 2 重になる） */
+body {
+  padding: 24px;
+}
+
+.glass {
+  position: relative;
+  width: 560px;
+  height: 460px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(244, 241, 255, 0.86));
+  box-shadow:
+    0 24px 60px rgba(15, 23, 42, 0.28),
+    0 2px 8px rgba(15, 23, 42, 0.12),
+    0 0 0 1px rgba(255, 255, 255, 0.7) inset;
+}
+
+/* 背景で漂う光の玉 */
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(46px);
+  opacity: 0.55;
+  pointer-events: none;
+  animation: drift 16s ease-in-out infinite;
+}
+.orb-a {
+  width: 320px;
+  height: 320px;
+  left: -90px;
+  top: -110px;
+  background: radial-gradient(circle at 30% 30%, #a78bfa, #7c3aed 60%, transparent 72%);
+}
+.orb-b {
+  width: 280px;
+  height: 280px;
+  right: -80px;
+  top: 40px;
+  background: radial-gradient(circle at 60% 40%, #f9a8d4, #db2777 60%, transparent 72%);
+  animation-delay: -6s;
+}
+.orb-c {
+  width: 260px;
+  height: 260px;
+  left: 160px;
+  bottom: -140px;
+  background: radial-gradient(circle at 50% 50%, #93c5fd, #2563eb 60%, transparent 72%);
+  animation-delay: -11s;
+}
+@keyframes drift {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(28px, -18px) scale(1.08);
+  }
+  66% {
+    transform: translate(-18px, 22px) scale(0.96);
+  }
+}
+
+/* タイトルバー（ドラッグで移動） */
+.titlebar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 10px 0 18px;
+}
+.titlebar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.titlebar-btns {
+  display: flex;
+  gap: 4px;
+}
+.tb {
+  width: 32px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.tb:hover {
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--ink);
+}
+.tb-close:hover {
+  background: #e11d48;
+  color: #fff;
+}
+
+/* 本文 */
+.content {
+  position: relative;
+  z-index: 2;
+  height: calc(100% - 44px);
+}
+.step {
+  position: absolute;
+  inset: 0;
+  padding: 8px 40px 32px;
+  display: none;
+  flex-direction: column;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.step.is-active {
+  display: flex;
+  opacity: 1;
+  transform: none;
+}
+
+.hero {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-bottom: 26px;
+}
+.logo {
+  width: 108px;
+  height: 108px;
+  filter: drop-shadow(0 14px 22px rgba(109, 40, 217, 0.35));
+  animation: float 6s ease-in-out infinite;
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+.hero-text h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.sub {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.version {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.path-row {
+  display: flex;
+  gap: 8px;
+}
+.path-row input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  outline: none;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.path-row input:focus {
+  border-color: rgba(109, 40, 217, 0.5);
+  box-shadow: 0 0 0 3px rgba(109, 40, 217, 0.15);
+}
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.error-text {
+  color: #b91c1c;
+}
+
+.actions {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.btn {
+  height: 42px;
+  padding: 0 22px;
+  border: none;
+  border-radius: 14px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.2s, background 0.2s, opacity 0.2s;
+}
+.btn:active {
+  transform: translateY(1px) scale(0.99);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn-primary {
+  color: #fff;
+  background: linear-gradient(135deg, #7c3aed, #db2777);
+  box-shadow: 0 10px 24px rgba(124, 58, 237, 0.35);
+}
+.btn-primary:hover:not(:disabled) {
+  box-shadow: 0 14px 30px rgba(124, 58, 237, 0.45);
+}
+.btn-ghost {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--line);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: #fff;
+}
+
+/* 進行中 */
+.step-progress {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.ring-wrap {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  margin-bottom: 18px;
+}
+.ring {
+  transform: rotate(-90deg);
+}
+.ring-bg {
+  fill: none;
+  stroke: rgba(15, 23, 42, 0.08);
+  stroke-width: 10;
+}
+.ring-fg {
+  fill: none;
+  stroke: url(#grad);
+  stroke: #7c3aed;
+  stroke-width: 10;
+  stroke-linecap: round;
+  stroke-dasharray: 326.7;
+  stroke-dashoffset: 326.7;
+  transition: stroke-dashoffset 0.4s ease;
+}
+.ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  padding-top: 42px;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.ring-label small {
+  font-size: 14px;
+  margin-left: 2px;
+  color: var(--muted);
+}
+.action {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  min-height: 20px;
+}
+
+/* 完了・失敗 */
+.step-done,
+.step-error {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.step-done .actions,
+.step-error .actions {
+  margin-top: 26px;
+  justify-content: center;
+}
+.check {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 14px;
+  animation: pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.check-bg {
+  fill: #dcfce7;
+  stroke: #22c55e;
+  stroke-width: 2;
+}
+.check-mark {
+  fill: none;
+  stroke: #16a34a;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 60;
+  stroke-dashoffset: 60;
+  animation: draw 0.6s 0.2s ease forwards;
+}
+.check-error .check-bg {
+  fill: #fee2e2;
+  stroke: #ef4444;
+}
+.check-error .check-mark {
+  stroke: #dc2626;
+}
+@keyframes pop {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 800;
+}

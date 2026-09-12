@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>JPMチャット セットアップ</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="glass" id="glass">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+
+      <header class="titlebar" data-tauri-drag-region>
+        <span class="titlebar-title" data-tauri-drag-region>JPMチャット セットアップ</span>
+        <div class="titlebar-btns">
+          <button class="tb" id="btn-min" title="最小化" aria-label="最小化">
+            <svg viewBox="0 0 12 12" width="12" height="12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+          </button>
+          <button class="tb tb-close" id="btn-close" title="閉じる" aria-label="閉じる">
+            <svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <!-- 1. 開始 -->
+        <section class="step step-start is-active" id="step-start">
+          <div class="hero">
+            <img class="logo" src="logo.png" alt="" draggable="false" />
+            <div class="hero-text">
+              <h1>JPMチャット</h1>
+              <p class="sub">社内コミュニケーション</p>
+              <p class="version">バージョン <span id="version">-</span></p>
+            </div>
+          </div>
+          <div class="field">
+            <label>インストール先</label>
+            <div class="path-row">
+              <input id="dir" type="text" spellcheck="false" />
+              <button class="btn btn-ghost" id="btn-pick">変更</button>
+            </div>
+            <p class="hint" id="dir-hint">利用者ごとにインストールします（管理者権限は不要）</p>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" id="btn-install">インストール</button>
+          </div>
+        </section>
+
+        <!-- 2. 進行中 -->
+        <section class="step step-progress" id="step-progress">
+          <div class="ring-wrap">
+            <svg class="ring" viewBox="0 0 120 120" width="120" height="120">
+              <circle class="ring-bg" cx="60" cy="60" r="52" />
+              <circle class="ring-fg" id="ring-fg" cx="60" cy="60" r="52" />
+            </svg>
+            <div class="ring-label"><span id="percent">0</span><small>%</small></div>
+          </div>
+          <p class="action" id="action">準備しています…</p>
+          <p class="hint">この間はウィンドウを閉じないでください</p>
+        </section>
+
+        <!-- 3. 完了 -->
+        <section class="step step-done" id="step-done">
+          <div class="check">
+            <svg viewBox="0 0 64 64" width="64" height="64">
+              <circle cx="32" cy="32" r="30" class="check-bg" />
+              <path d="M20 33l8 8 16-18" class="check-mark" />
+            </svg>
+          </div>
+          <h2>インストールが完了しました</h2>
+          <p class="hint" id="done-msg"></p>
+          <div class="actions">
+            <button class="btn btn-ghost" id="btn-finish">閉じる</button>
+            <button class="btn btn-primary" id="btn-launch">JPMチャットを起動</button>
+          </div>
+        </section>
+
+        <!-- 4. 失敗 -->
+        <section class="step step-error" id="step-error">
+          <div class="check check-error">
+            <svg viewBox="0 0 64 64" width="64" height="64">
+              <circle cx="32" cy="32" r="30" class="check-bg" />
+              <path d="M22 22l20 20M42 22l-20 20" class="check-mark" />
+            </svg>
+          </div>
+          <h2>インストールできませんでした</h2>
+          <p class="hint error-text" id="error-msg"></p>
+          <div class="actions">
+            <button class="btn btn-ghost" id="btn-error-close">閉じる</button>
+            <button class="btn btn-primary" id="btn-retry">もう一度</button>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

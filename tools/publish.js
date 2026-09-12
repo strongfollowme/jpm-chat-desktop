@@ -12,7 +12,9 @@
  *
  * 配信先: D:\jpm-updater-server\jpm-chat\   ← 26 機の docker nginx(jpm-updater, :8099) が読み取り専用で公開
  *   JPMChat-<version>.msi … electron-updater が取得する実体（latest.yml の path と一致させる）
- *   JPMChat-Setup.msi     … Web のホーム画面「インストーラをダウンロード」が指す固定名（常に最新）
+ *   JPMChat-Setup.msi     … MSI の固定名（常に最新）
+ *   JPMChat-Setup.exe     … Web のホーム画面「インストーラをダウンロード」が指す固定名。MSI を内蔵した自前の画面のインストーラ
+ *                           （installer/ の Tauri アプリ。--no-installer で省略可）
  *   latest.yml            … 版番号と sha512。exe はこれと自分の版を比べて更新を案内する
  *
  * 【注意】electron-builder は msi ターゲットでは latest.yml を作らないので、ここで自前で作る。
@@ -93,6 +95,45 @@ const fileName = `JPMChat-${version}.msi`;
 fs.mkdirSync(PUBLISH_DIR, { recursive: true });
 fs.copyFileSync(msi, path.join(PUBLISH_DIR, fileName));
 fs.copyFileSync(msi, path.join(PUBLISH_DIR, "JPMChat-Setup.msi"));
+
+// ---- 自前インストーラ(JPMChat-Setup.exe) ----
+// installer/ の Tauri アプリに MSI を内蔵してビルドする。Web のホームの案内モーダルはこれを指す。
+// MSI の古い見た目のダイアログを出さず、すりガラス風の画面でインストール先の選択・進捗・起動まで行う。
+// 自動更新は従来どおり MSI(msiexec /passive)を使うので、こちらは初回インストール用。
+if (!args.includes("--no-installer")) {
+    const installerDir = path.join(ROOT, "installer", "src-tauri");
+    const embedded = path.join(installerDir, "embedded");
+    fs.mkdirSync(embedded, { recursive: true });
+    fs.copyFileSync(msi, path.join(embedded, "JPMChat.msi"));
+    fs.writeFileSync(
+        path.join(embedded, "meta.json"),
+        JSON.stringify(
+            {
+                version,
+                sha256: crypto.createHash("sha256").update(data).digest("hex"),
+                exe_name: `${pkg.build.productName}.exe`,
+            },
+            null,
+            2,
+        ),
+        "utf8",
+    );
+    const cargoBin = path.join(process.env.USERPROFILE || "", ".cargo", "bin");
+    console.log("セットアップ exe をビルドしています…（初回は数分かかります）");
+    execSync("cargo build --release", {
+        cwd: installerDir,
+        stdio: "inherit",
+        env: { ...process.env, PATH: `${cargoBin};${process.env.PATH}`, ELECTRON_RUN_AS_NODE: "" },
+    });
+    const setupExe = path.join(installerDir, "target", "release", "jpm-chat-setup.exe");
+    if (!fs.existsSync(setupExe)) {
+        console.error("セットアップ exe が見つかりません: " + setupExe);
+        process.exit(1);
+    }
+    fs.copyFileSync(setupExe, path.join(PUBLISH_DIR, `JPMChat-${version}-Setup.exe`));
+    fs.copyFileSync(setupExe, path.join(PUBLISH_DIR, "JPMChat-Setup.exe"));
+    console.log(`  ${path.join(PUBLISH_DIR, "JPMChat-Setup.exe")} (${(fs.statSync(setupExe).size / 1024 / 1024).toFixed(1)} MB)`);
+}
 
 const yml = [
     `version: ${version}`,
