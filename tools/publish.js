@@ -10,7 +10,15 @@
  * electron-builder は 3 桁 semver しか受け付けないので、package.json の "version" には上 3 桁だけを、
  * 実際の版番号は "jpmVersion" に持つ（アプリの表示・更新判定・配信ファイル名はすべて jpmVersion）。
  *
- * 配信先: D:\jpm-updater-server\jpm-chat\   ← 26 機の docker nginx(jpm-updater, :8099) が読み取り専用で公開
+ * 配信先(2026-09-12 以降は 2 箇所へ発行):
+ *   ① AWS  s3://superjpm-frontend/downloads/jpm-chat/  ← CloudFront 経由で
+ *          https://web.airparking.in/downloads/jpm-chat/ として公開（**これが本番**）
+ *   ② 社内  D:\jpm-updater-server\jpm-chat\            ← 26 機の nginx(:8099)。**移行期間のみ**
+ *          既存インストール済みの端末は旧 URL しか見ないため、全端末が新版へ上がるまで残す。
+ *          上がりきったら `JPM_CHAT_PUBLISH_DIR=D:\temp\jpm-chat-staging` のように
+ *          配信されない場所へ向ければ社内配信は止まる（8099 も停止してよい）。
+ *   ※ PUBLISH_DIR は AWS へ上げる際の**置き場（ステージング）も兼ねる**ので、無効化ではなく移動で止める。
+ *   環境変数: JPM_CHAT_AWS_PUBLISH=0 で AWS 側の発行だけを止められる。
  *   JPMChat-<version>.msi … electron-updater が取得する実体（latest.yml の path と一致させる）
  *   JPMChat-Setup.msi     … MSI の固定名（常に最新）
  *   JPMChat-Setup.exe     … Web のホーム画面「インストーラをダウンロード」が指す固定名。MSI を内蔵した自前の画面のインストーラ
@@ -151,3 +159,52 @@ fs.writeFileSync(path.join(PUBLISH_DIR, "latest.yml"), yml, "utf8");
 console.log(`発行完了: ${version}`);
 console.log(`  ${path.join(PUBLISH_DIR, fileName)} (${(data.length / 1024 / 1024).toFixed(1)} MB)`);
 console.log(`  ${path.join(PUBLISH_DIR, "latest.yml")}`);
+
+// ===========================================================================
+// AWS(S3 + CloudFront)へも発行する
+//
+// 2026-09-12: 配信を社内 26 機から AWS へ移した。社外からも更新でき、26 機の
+// 稼働に依存しなくなる。ビルド自体は 26 に残す（Windows + WiX + Rust が要るため）。
+//
+// 【キャッシュ指定が肝】CloudFront は S3 の Cache-Control をそのまま使う。
+//   - latest.yml / JPMChat-Setup.(exe|msi) は **固定名なのに中身が変わる** →
+//     no-cache にしないと、更新したのに古い版を配り続ける（rule 38 と同じ罠）。
+//   - JPMChat-<version>.msi は名前に版が入る＝中身が変わらない → 長期キャッシュで良い。
+//
+// 【移行期間】既にインストール済みの端末は旧 URL(26)しか見ないため、両方へ発行する。
+//   全端末が新版へ上がったら JPM_CHAT_PUBLISH_DIR を配信されない場所へ向けて旧側を止める。
+// ===========================================================================
+const S3_PREFIX = process.env.JPM_CHAT_S3_PREFIX || "s3://superjpm-frontend/downloads/jpm-chat";
+const CF_DIST_ID = process.env.JPM_CHAT_CF_DIST_ID || "E2Z1TJFUF6AERL";
+const NO_CACHE = "no-cache, must-revalidate";
+const LONG_CACHE = "public, max-age=31536000, immutable";
+
+if (process.env.JPM_CHAT_AWS_PUBLISH !== "0") {
+    const up = (local, key, cacheControl, contentType) => {
+        const ct = contentType ? ` --content-type "${contentType}"` : "";
+        execSync(
+            `aws s3 cp "${local}" "${S3_PREFIX}/${key}" --cache-control "${cacheControl}"${ct} --only-show-errors`,
+            { stdio: "inherit" },
+        );
+        console.log(`  S3 ← ${key}`);
+    };
+    console.log("AWS へ発行しています…");
+    // 版番号入りの実体を先に上げる。latest.yml はこれらが揃ってから最後に上げること
+    //（先に上げると、まだ存在しないファイルを取りに行く端末が出る）。
+    up(path.join(PUBLISH_DIR, fileName), fileName, LONG_CACHE, "application/x-msi");
+    up(path.join(PUBLISH_DIR, "JPMChat-Setup.msi"), "JPMChat-Setup.msi", NO_CACHE, "application/x-msi");
+    if (!args.includes("--no-installer")) {
+        up(path.join(PUBLISH_DIR, `JPMChat-${version}-Setup.exe`), `JPMChat-${version}-Setup.exe`, LONG_CACHE, "application/vnd.microsoft.portable-executable");
+        up(path.join(PUBLISH_DIR, "JPMChat-Setup.exe"), "JPMChat-Setup.exe", NO_CACHE, "application/vnd.microsoft.portable-executable");
+    }
+    // ---- 最後に latest.yml ----
+    up(path.join(PUBLISH_DIR, "latest.yml"), "latest.yml", NO_CACHE, "text/yaml");
+
+    // 固定名のものだけ CloudFront のキャッシュを消す（版番号入りは消す必要がない）
+    const paths = ["/downloads/jpm-chat/latest.yml", "/downloads/jpm-chat/JPMChat-Setup.exe", "/downloads/jpm-chat/JPMChat-Setup.msi"];
+    execSync(
+        `aws cloudfront create-invalidation --distribution-id ${CF_DIST_ID} --paths ${paths.join(" ")} --query "Invalidation.Id" --output text`,
+        { stdio: "inherit" },
+    );
+    console.log(`AWS 発行完了: ${S3_PREFIX}/latest.yml`);
+}

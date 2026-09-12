@@ -28,7 +28,19 @@ const PROTOCOL = "jpmchat";
  * 自動更新の配信元（latest.yml と MSI の置き場所・末尾スラッシュ付き）。
  * 【注意】package.json の build.publish.url と同じ値にすること。electron-builder はパッケージ時に
  * package.json から build セクションを削除するため、実行時はこちらの定数を使う。
+ *
+ * 2026-09-12: 社内 26 機(http://192.168.26.26:8099/)から **AWS(S3 + CloudFront)** へ移行。
+ *   - 社外からも更新できるようになる（従来は社内ネットワークからのみ）
+ *   - 26 機の稼働に依存しなくなる
+ *   ※ 置き場所は業務フロントと同じバケット/分発の `downloads/` 配下。専用ドメインも証明書も要らない。
+ *
+ * 【重要・切替の順序】「新しい配信元を知っている」のは**新しい exe だけ**。
+ *   既にインストール済みの端末は旧 URL(26)しか見に行かないため、
+ *   ① この変更を入れた版を **まず 26 の旧 URL へも発行**し、
+ *   ② 全端末がその版へ更新されたことを確認してから、
+ *   ③ 26 の 8099 を停止する。
+ *   publish.js は移行期間中この両方へ発行する（JPM_CHAT_LEGACY_PUBLISH=0 で旧側を止められる）。
  */
-const UPDATE_FEED_URL = "http://192.168.26.26:8099/jpm-chat/";
+const UPDATE_FEED_URL = "https://web.airparking.in/downloads/jpm-chat/";
 
 module.exports = { CHAT_ORIGIN, HOMESERVER_URL, JPM_API_BASE, PROTOCOL, UPDATE_FEED_URL };

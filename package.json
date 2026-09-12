@@ -28,7 +28,7 @@
     ],
     "publish": {
       "provider": "generic",
-      "url": "http://192.168.26.26:8099/jpm-chat/"
+      "url": "https://web.airparking.in/downloads/jpm-chat/"
     },
     "win": {
       "target": [
