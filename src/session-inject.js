@@ -298,6 +298,33 @@ const MARK_PAGE_VISIBLE_SCRIPT = `
 })();
 `;
 
+/**
+ * セッション注入の踏み台に使う /config.json の画面を空にする。
+ * /config.json は JSON がそのまま文字で表示されるページで、ログイン画面の裏で読んでいるが、
+ * 次の #/home へ遷移した直後に element が最初の描画をするまで Chromium が前の画面(=JSON の文字)を
+ * 保持して見せるため、一瞬 JSON が見えていた。中身は誰でも取れる公開設定だが、見えるべきものではない。
+ */
+const BLANK_PAGE_SCRIPT = `
+(function () {
+    try {
+        document.title = "";
+        document.body.innerHTML = "";
+        document.body.style.background = "#fff";
+        return true;
+    } catch (e) { return false; }
+})();
+`;
+
+/** element-web が最初の画面を描いたか（#matrixchat の中に React が何か描いたか）。 */
+const CHAT_PAINTED_SCRIPT = `
+(function () {
+    try {
+        var root = document.getElementById("matrixchat");
+        return !!(root && root.childElementCount > 0);
+    } catch (e) { return false; }
+})();
+`;
+
 module.exports = {
     buildInjectScript,
     CHECK_SESSION_SCRIPT,
@@ -306,6 +333,8 @@ module.exports = {
     DIAGNOSE_NOTIFICATION_SCRIPT,
     NOTIFICATION_TRACE_SCRIPT,
     ENABLE_NOTIFICATIONS_SCRIPT,
+    BLANK_PAGE_SCRIPT,
+    CHAT_PAINTED_SCRIPT,
     DESKTOP_CHROME_CSS,
     MARK_PAGE_HIDDEN_SCRIPT,
     MARK_PAGE_VISIBLE_SCRIPT,

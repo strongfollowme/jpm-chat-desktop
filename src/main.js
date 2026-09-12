@@ -26,6 +26,8 @@ const {
     DIAGNOSE_NOTIFICATION_SCRIPT,
     NOTIFICATION_TRACE_SCRIPT,
     ENABLE_NOTIFICATIONS_SCRIPT,
+    BLANK_PAGE_SCRIPT,
+    CHAT_PAINTED_SCRIPT,
 } = require("./session-inject");
 const { initLogger, log, getLogPath } = require("./logger");
 const { MatrixNotifier } = require("./notifier");
@@ -707,6 +709,8 @@ async function applySessionAndOpenChat(session) {
         // localStorage を書き換えることになり、真っ白な画面になった（実測）。/config.json → /#/home は本当の遷移になる。
         // （同じサイト内なのでレンダラプロセスは変わらない＝入力が効かなくなる問題は起きない）
         await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/config.json?_=" + Date.now()));
+        // JSON の文字を消しておく（#/home へ遷移した直後、element の初回描画までこの画面が保持されて見えるため）
+        await wc().executeJavaScript(BLANK_PAGE_SCRIPT, true);
         await wc().executeJavaScript(buildInjectScript(session), true);
         // 「デスクトップ通知」もここで有効にしておく（起動後に書き換えて reload しなくて済む）
         await wc().executeJavaScript(ENABLE_NOTIFICATIONS_SCRIPT, true);
@@ -717,7 +721,30 @@ async function applySessionAndOpenChat(session) {
     if (notifier) notifier.start(session.accessToken, session.userId);
     // 注入した認証情報で element-web を初期化し直す（同じサイト内の遷移なのでプロセスは変わらない）
     await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/#/home"));
+    // element が最初の画面を描くまでログイン画面を手前に残す（真っ白や前の画面が一瞬見えないように）
+    await waitForChatPainted();
     hideLoginPage();
+}
+
+/**
+ * element-web が #matrixchat に最初の描画をするまで待つ（最長 5 秒。超えたら諦めて進む）。
+ * 読み込み完了(did-stop-loading)の時点では JS が動き出しただけで画面は空のため、これを待たずに
+ * ログイン画面を下げると、前の画面(注入用の /config.json)の保持画像や真っ白が一瞬見える。
+ */
+async function waitForChatPainted() {
+    const t0 = Date.now();
+    while (Date.now() - t0 < 5000) {
+        try {
+            if (await wc().executeJavaScript(CHAT_PAINTED_SCRIPT, true)) {
+                log(`[ログイン] チャット画面の初回描画を確認 (${Date.now() - t0}ms)`);
+                return;
+            }
+        } catch {
+            // 遷移中は評価に失敗することがある。少し待って再試行
+        }
+        await new Promise((r) => setTimeout(r, 50));
+    }
+    log("[ログイン] チャット画面の初回描画を 5 秒待っても確認できないため、そのまま進めます");
 }
 
 /**
@@ -860,6 +887,12 @@ async function logout() {
     await clearChatStorage();
     // element を動かしたままにせず、同じオリジンの素のページへ退避させておく（次のログインで本当の遷移になる）
     await safeLoad(() => wc().loadURL(CHAT_ORIGIN + "/config.json?_=" + Date.now()));
+    // 退避先の JSON の文字も消しておく（ログイン画面の裏側とはいえ表示しない）
+    try {
+        await wc().executeJavaScript(BLANK_PAGE_SCRIPT, true);
+    } catch {
+        // 消せなくても支障はない（次のログインで読み直す）
+    }
     showMainWindow();
 }
 
