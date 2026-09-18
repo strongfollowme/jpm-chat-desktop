@@ -141,6 +141,22 @@ if (!args.includes("--no-installer")) {
     fs.copyFileSync(setupExe, path.join(PUBLISH_DIR, `JPMChat-${version}-Setup.exe`));
     fs.copyFileSync(setupExe, path.join(PUBLISH_DIR, "JPMChat-Setup.exe"));
     console.log(`  ${path.join(PUBLISH_DIR, "JPMChat-Setup.exe")} (${(fs.statSync(setupExe).size / 1024 / 1024).toFixed(1)} MB)`);
+
+    // ---- Edge 対策の zip ----
+    // 署名が無いため、端末によっては Edge が .exe のダウンロードそのものを遮断する(実測)。
+    // zip なら遮断されにくいので、設定の「デスクトップ版」タブは Edge にこちらを既定で出す
+    // (JpmDesktopUserSettingsTab.tsx)。中身は同じ JPMChat-Setup.exe。
+    //
+    // 【なぜここで作るのか】2026-09-18 まで zip は手作業で上げており、
+    //   発行しても zip だけ古いままになる状態だった(Edge の利用者だけ旧版を掴む)。
+    //   手で作る限り必ず忘れるので、発行の一部にする。
+    const zipPath = path.join(PUBLISH_DIR, "JPMChat-Setup.zip");
+    if (fs.existsSync(zipPath)) fs.rmSync(zipPath);
+    execSync(
+        `powershell -NoProfile -Command "Compress-Archive -Path '${path.join(PUBLISH_DIR, "JPMChat-Setup.exe")}' -DestinationPath '${zipPath}' -Force"`,
+        { stdio: "inherit" },
+    );
+    console.log(`  ${zipPath} (${(fs.statSync(zipPath).size / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 const yml = [
@@ -196,12 +212,19 @@ if (process.env.JPM_CHAT_AWS_PUBLISH !== "0") {
     if (!args.includes("--no-installer")) {
         up(path.join(PUBLISH_DIR, `JPMChat-${version}-Setup.exe`), `JPMChat-${version}-Setup.exe`, LONG_CACHE, "application/vnd.microsoft.portable-executable");
         up(path.join(PUBLISH_DIR, "JPMChat-Setup.exe"), "JPMChat-Setup.exe", NO_CACHE, "application/vnd.microsoft.portable-executable");
+        // 固定名で中身が変わるので no-cache(Edge 向けの導線がこれを指している)
+        up(path.join(PUBLISH_DIR, "JPMChat-Setup.zip"), "JPMChat-Setup.zip", NO_CACHE, "application/zip");
     }
     // ---- 最後に latest.yml ----
     up(path.join(PUBLISH_DIR, "latest.yml"), "latest.yml", NO_CACHE, "text/yaml");
 
     // 固定名のものだけ CloudFront のキャッシュを消す（版番号入りは消す必要がない）
-    const paths = ["/downloads/jpm-chat/latest.yml", "/downloads/jpm-chat/JPMChat-Setup.exe", "/downloads/jpm-chat/JPMChat-Setup.msi"];
+    const paths = [
+        "/downloads/jpm-chat/latest.yml",
+        "/downloads/jpm-chat/JPMChat-Setup.exe",
+        "/downloads/jpm-chat/JPMChat-Setup.msi",
+        "/downloads/jpm-chat/JPMChat-Setup.zip",
+    ];
     execSync(
         `aws cloudfront create-invalidation --distribution-id ${CF_DIST_ID} --paths ${paths.join(" ")} --query "Invalidation.Id" --output text`,
         { stdio: "inherit" },
