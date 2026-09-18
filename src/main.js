@@ -78,6 +78,12 @@ let chatView = null;
  */
 let loginView = null;
 let loginShown = false;
+/**
+ * 上端 32px のタイトルバー用ビュー。
+ * ここに「掴める領域」を持つ頁を敷かないと、ウィンドウを動かせない
+ * (titleBarStyle:"hidden" はボタンを描くだけで、ドラッグ領域は作らない)。
+ */
+let titleBarView = null;
 /** ビューの位置合わせ（createWindow で設定。ログイン画面を出す時にも呼ぶ） */
 let layoutViews = () => {};
 /** タイトルバーの高さ(px)。ウィンドウ操作ボタンのオーバーレイと揃える。 */
@@ -157,6 +163,23 @@ function createWindow() {
     chatView.setBackgroundColor("#ffffff");
     mainWindow.contentView.addChildView(chatView);
 
+    // 上端 32px のタイトルバー。**ウィンドウを掴んで動かすために要る**。
+    //   titleBarStyle:"hidden" はボタンだけ titleBarOverlay が描いてくれるが、
+    //   掴める領域(-webkit-app-region: drag)はアプリ側の頁でしか作れない。
+    //   ここに何も読み込んでいなかったため、ウィンドウがまったく動かせなかった。
+    //   チャット本体は y=32 から下なので、element-web には一切触らずに済む。
+    titleBarView = new WebContentsView({
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: false,
+        },
+    });
+    titleBarView.setBackgroundColor("#e2e8f0");
+    titleBarView.webContents.loadFile(path.join(__dirname, "titlebar.html"));
+    mainWindow.contentView.addChildView(titleBarView);
+
     // ログイン画面用のビュー（必要な時だけ子ビューに加えて手前に出す）
     loginView = new WebContentsView({
         webPreferences: {
@@ -175,6 +198,8 @@ function createWindow() {
         const bounds = { x: 0, y: TITLE_BAR_HEIGHT, width: w, height: Math.max(0, h - TITLE_BAR_HEIGHT) };
         chatView.setBounds(bounds);
         if (loginView) loginView.setBounds(bounds);
+        // タイトルバーは上端いっぱい。幅が変わっても掴める場所が途切れないようにする
+        if (titleBarView) titleBarView.setBounds({ x: 0, y: 0, width: w, height: TITLE_BAR_HEIGHT });
     };
     layoutViews();
     mainWindow.on("resize", layoutViews);
@@ -467,7 +492,11 @@ function attractAttention() {
         mainWindow.showInactive();
         mainWindow.minimize();
     }
-    mainWindow.flashFrame(true);
+    // 前面で操作中に点滅させるのは煩わしいだけなので、その時は光らせない。
+    //   (窓が開いていても別のアプリを触っている間は点滅させる = LINE と同じ)
+    if (!mainWindow.isFocused()) {
+        mainWindow.flashFrame(true);
+    }
     updateBadge(pendingNotifications);
 }
 
@@ -1005,6 +1034,19 @@ app.whenReady().then(async () => {
     notifier = new MatrixNotifier({
         iconPath: ICON_PATH,
         isWindowHidden: () => isWindowHidden(),
+        // 「今まさに見ている部屋」だけ通知を出さないための判定。
+        //   element-web は開いている部屋を URL のハッシュ(#/room/<id>)に出すので、
+        //   相手側に手を入れずにここから読み取れる。
+        //   前面に出ていない時は「見ている」とは言えないので常に通知する。
+        isViewingRoom: (roomId) => {
+            try {
+                if (!mainWindow || mainWindow.isDestroyed()) return false;
+                if (!mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused()) return false;
+                return decodeURIComponent(wc().getURL() || "").includes(`/room/${roomId}`);
+            } catch (e) {
+                return false; // 判定できない時は通知する側に倒す(取りこぼしの方が困る)
+            }
+        },
         onNotified: () => attractAttention(),
         onOpenRoom: (roomId) => {
             // 通知をクリックしたらウィンドウを出して該当の部屋を開く

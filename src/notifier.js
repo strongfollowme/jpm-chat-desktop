@@ -31,12 +31,15 @@ const SYNC_TIMEOUT_MS = 30000;
 class MatrixNotifier {
     /**
      * @param {object} deps
-     * @param {() => boolean} deps.isWindowHidden ウィンドウが退避中か（通知を出すかの判断に使う）
+     * @param {() => boolean} deps.isWindowHidden ウィンドウが退避中か（記録用。通知の可否には使わない）
+     * @param {(roomId: string) => boolean} [deps.isViewingRoom] その部屋を今まさに見ているか
+     *        （見ている部屋にだけ通知を出さないための判定。省略時は常に通知する）
      * @param {(roomId: string) => void} deps.onOpenRoom 通知クリック時に開く部屋
      */
-    constructor({ iconPath, isWindowHidden, onOpenRoom, onNotified }) {
+    constructor({ iconPath, isWindowHidden, isViewingRoom, onOpenRoom, onNotified }) {
         this.iconPath = iconPath;
         this.isWindowHidden = isWindowHidden;
+        this.isViewingRoom = isViewingRoom || null;
         this.onOpenRoom = onOpenRoom;
         this.onNotified = onNotified || (() => {});
 
@@ -161,9 +164,16 @@ class MatrixNotifier {
 
     /** 実際に通知を出す。 */
     async notify(roomId, ev) {
-        // ウィンドウが見えている時は element-web 側が通知するので二重に出さない
-        if (!this.isWindowHidden()) return;
         if (!Notification.isSupported()) return;
+        // 【以前の不具合】ここで「ウィンドウが見えていれば出さない」としていた。
+        //   理由は「見えている時は element-web 側が通知するから二重になる」だったが、
+        //   本アプリはレンダラ側の通知を止めている(通知はこのメインプロセスが自前の
+        //   /sync で出す設計)。つまり**窓を開いている間はどこからも通知が出ない**という
+        //   状態になっていた。利用者の指摘どおり、開いていても通知を出す。
+        //
+        //   ただし「今まさに見ている部屋」だけは出さない。目の前の発言に
+        //   通知が重なるのは煩わしいだけで、LINE も同じ振る舞いをする。
+        if (this.isViewingRoom && this.isViewingRoom(roomId)) return;
 
         const roomName = await this.getRoomName(roomId);
         const sender = await this.getDisplayName(ev.sender);

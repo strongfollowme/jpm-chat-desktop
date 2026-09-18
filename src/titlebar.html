@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>JPMチャット</title>
+<!--
+  ウィンドウ上部 32px のタイトルバー。
+
+  【なぜ必要か】
+  titleBarStyle:"hidden" にすると OS の既定のタイトルバーが消える。
+  ボタン(最小化/最大化/閉じる)は titleBarOverlay が描いてくれるが、
+  **掴んで動かせる領域はアプリ側が CSS で指定しないと存在しない**。
+  これまでこの帯には何も読み込んでいなかったため、
+  「ウィンドウがどこを掴んでも動かせない」状態になっていた。
+
+  チャット本体(WebContentsView)は y=32 から下に敷いてあるので、
+  この頁が見えるのは上端の帯だけ。element-web には一切手を入れない。
+-->
+<style>
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #e2e8f0; /* BrowserWindow の backgroundColor と合わせる */
+  }
+
+  .bar {
+    /* 右端の WINDOW_BUTTONS_W は最小化/最大化/閉じるのために空けておく。
+       掴める領域をボタンの下まで広げると、環境によってはボタンの
+       クリックが「ドラッグの開始」として吸われて押せなくなる。 */
+    position: absolute;
+    left: 0;
+    right: 150px;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-left: 12px;
+    /* ここが「掴める」場所。これが無いとウィンドウを動かせない */
+    -webkit-app-region: drag;
+    user-select: none;
+    cursor: default;
+  }
+
+  /* ボタンが描かれる帯。ここは絶対に drag にしない。 */
+  .buttons {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 150px;
+    -webkit-app-region: no-drag;
+  }
+
+  .title {
+    font: 12px/1 "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+    color: #1e293b;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #64748b;
+    flex: none;
+  }
+</style>
+<div class="bar">
+  <span class="dot"></span>
+  <span class="title">JPMチャット</span>
+</div>
+<div class="buttons"></div>
